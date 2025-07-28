@@ -30,42 +30,46 @@ df['volume_unit'] = df['volume_unit'].astype(str)
 df['price_per_unit'] = df['Price'] / df['volume_standard']
 
 # ------------------------
-# Sidebar filters
+# Sidebar filters (dinámicos)
 # ------------------------
 st.sidebar.header("Quotation Filters")
 
-# 1) Product
+# 1) Product (siempre todas las opciones)
 product = st.sidebar.selectbox(
     "Product",
     sorted(df['Product'].dropna().unique())
 )
 
-# 2) Dynamic Location based on selected Product
-available_locs = sorted(
-    df[df['Product'] == product]['Location']
-      .dropna()
-      .unique()
-)
+# 2) Location (solo las que tiene el producto)
+locs_for_product = df[df['Product'] == product]['Location'].dropna().unique()
 locations = st.sidebar.multiselect(
     "Location",
-    options=available_locs,
-    default=available_locs
+    options=sorted(locs_for_product),
+    default=sorted(locs_for_product)
 )
 
-# 3) Otros filtros
+# 3) Organic Status (solo las que quedan tras filtrar producto+locaciones)
+sub = df[df['Product'] == product]
+if locations:
+    sub = sub[sub['Location'].isin(locations)]
+org_vals = sub['Organic'].dropna().unique().tolist()
+# map numeric a etiquetas
+org_map = {0: 'Conventional', 1: 'Organic'}
+org_options = ['All'] + [org_map[o] for o in sorted(org_vals)]
 organic = st.sidebar.selectbox(
     "Organic Status",
-    ['All', 'Conventional', 'Organic']
-)
-volume_unit = st.sidebar.selectbox(
-    "Volume Unit",
-    ['All'] + sorted(df['volume_unit'].unique())
+    org_options
 )
 
-def organic_to_num(val):
-    if val == 'Conventional': return 0
-    if val == 'Organic':     return 1
-    return None
+# 4) Volume Unit (solo las que quedan tras filtrar producto+loc+org)
+sub2 = sub.copy()
+if organic != 'All':
+    sub2 = sub2[sub2['Organic'] == (1 if organic=='Organic' else 0)]
+vu_opts = sorted(sub2['volume_unit'].dropna().unique())
+volume_unit = st.sidebar.selectbox(
+    "Volume Unit",
+    ['All'] + vu_opts
+)
 
 # ------------------------
 # Aplicar filtros
