@@ -1,10 +1,6 @@
 import streamlit as st
 import pandas as pd
 import os
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 import altair as alt
 
 # ------------------------
@@ -36,25 +32,22 @@ df['price_per_unit'] = df['Price'] / df['volume_standard']
 
 # Sidebar filters
 st.sidebar.header("Quotation Filters")
-product = st.sidebar.selectbox("Product", sorted(df['Product'].dropna().unique()))
-location = st.sidebar.selectbox("Location", ['All'] + sorted(df['Location'].dropna().unique()))
-organic = st.sidebar.selectbox("Organic Status", ['All', 'Conventional', 'Organic'])
-volume_unit = st.sidebar.selectbox("Volume Unit", ['All'] + sorted(df['volume_unit'].unique()))
+product      = st.sidebar.selectbox("Product", sorted(df['Product'].dropna().unique()))
+location     = st.sidebar.selectbox("Location", ['All'] + sorted(df['Location'].dropna().unique()))
+organic      = st.sidebar.selectbox("Organic Status", ['All', 'Conventional', 'Organic'])
+volume_unit  = st.sidebar.selectbox("Volume Unit", ['All'] + sorted(df['volume_unit'].unique()))
 
 def organic_to_num(val):
-    if val == 'Conventional':
-        return 0
-    if val == 'Organic':
-        return 1
+    if val == 'Conventional': return 0
+    if val == 'Organic':      return 1
     return None
 
 # Apply filters
 g = df[df['Product'] == product]
-if location != 'All':
+if location    != 'All':
     g = g[g['Location'] == location]
-if organic != 'All':
-    org_val = organic_to_num(organic)
-    g = g[g['Organic'] == org_val]
+if organic     != 'All':
+    g = g[g['Organic'] == organic_to_num(organic)]
 if volume_unit != 'All':
     g = g[g['volume_unit'] == volume_unit]
 
@@ -73,12 +66,12 @@ if g.empty:
     st.warning("No hay datos para los filtros seleccionados.")
 else:
     display = g.rename(columns={
-        'Product': 'Product',
-        'Location': 'Location',
-        'volume_unit': 'Volume Unit',
+        'Product':        'Product',
+        'Location':       'Location',
+        'volume_unit':    'Volume Unit',
         'price_per_unit': 'Price per Unit',
-        'VendorClean': 'Vendor'
-    })[['Product', 'Location', 'Volume Unit', 'Price per Unit', 'Vendor']]
+        'VendorClean':    'Vendor'
+    })[['Product','Location','Volume Unit','Price per Unit','Vendor']]
     display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
     st.subheader("Filtered Quotations")
     st.dataframe(display)
@@ -100,5 +93,6 @@ else:
     )
     st.altair_chart(chart, use_container_width=True)
 
-    best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
-    st.success(f"**Suggested Vendor:** {best['VendorClean']} at ${best['price_per_unit']:.2f} per unit")
+    # Vendor recomendado: el de precio por unidad MÁS ALTO
+    best = g.loc[g['price_per_unit'].idxmax()]
+    st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
