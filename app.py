@@ -1,3 +1,24 @@
+# justo después de import streamlit as st...
+BRAND_GREEN = "#8DC63F"
+
+st.markdown(f"""
+<style>
+/* Multiselect tags */
+div.stMultiSelect span[data-baseweb="tag"] {{
+  background-color: {BRAND_GREEN} !important;
+  color: white !important;
+}}
+
+/* Selectbox flecha y borde en foco */
+div.stSelectbox div[data-baseweb="select"] {{
+  border-color: {BRAND_GREEN} !important;
+}}
+div.stSelectbox div[data-baseweb="select"]:focus-within {{
+  box-shadow: 0 0 0 0.2rem rgba(141,198,63,0.25) !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
 import streamlit as st
 import pandas as pd
 import os
