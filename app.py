@@ -17,7 +17,6 @@ BRAND_GREEN = "#8DC63F"  # Primary FruttoFoods green
 
 # Load data
 data_path = "data/market_cleaned.xlsx"
-
 if os.path.exists(data_path):
     df = pd.read_excel(data_path)
 else:
@@ -43,8 +42,10 @@ organic = st.sidebar.selectbox("Organic Status", ['All', 'Conventional', 'Organi
 volume_unit = st.sidebar.selectbox("Volume Unit", ['All'] + sorted(df['volume_unit'].unique()))
 
 def organic_to_num(val):
-    if val == 'Conventional': return 0
-    if val == 'Organic': return 1
+    if val == 'Conventional':
+        return 0
+    if val == 'Organic':
+        return 1
     return None
 
 # Apply filters
@@ -69,7 +70,7 @@ with col2:
 
 # Display results
 if g.empty:
-    st.warning("No data available for the selected filters.")
+    st.warning("No hay datos para los filtros seleccionados.")
 else:
     display = g.rename(columns={
         'Product': 'Product',
@@ -101,27 +102,3 @@ else:
 
     best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
     st.success(f"**Suggested Vendor:** {best['VendorClean']} at ${best['price_per_unit']:.2f} per unit")
-
-    st.subheader("Predictive Model: Price per Unit")
-    if len(g) >= 5:
-        model_df = df[['Product', 'Location', 'Organic', 'volume_unit', 'price_per_unit']].copy()
-        X = model_df.drop('price_per_unit', axis=1)
-        y = model_df['price_per_unit']
-        preprocessor = ColumnTransformer([
-            ('cat', OneHotEncoder(handle_unknown='ignore'), ['Product', 'Location', 'volume_unit'])
-        ], remainder='passthrough')
-        model = Pipeline([
-            ('pre', preprocessor),
-            ('reg', LinearRegression())
-        ])
-        model.fit(X, y)
-        inp = pd.DataFrame([{  
-            'Product': product,
-            'Location': location if location != 'All' else df['Location'].mode()[0],
-            'Organic': organic_to_num(organic) if organic != 'All' else 0,
-            'volume_unit': volume_unit if volume_unit != 'All' else df['volume_unit'].mode()[0]
-        }])
-        pred = model.predict(inp)[0]
-        st.info(f"Estimated Price/Unit: ${pred:.2f}")
-    else:
-        st.info("Not enough data for reliable predictions.")
