@@ -12,7 +12,7 @@ LOGO_PATH = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"  # Primary FruttoFoods green
 
 # Load data
-data_path = "data/market_cleaned.xlsx"
+data_path = "data/market_cleaned_cleaned.xlsx"
 if os.path.exists(data_path):
     df = pd.read_excel(data_path)
 else:
