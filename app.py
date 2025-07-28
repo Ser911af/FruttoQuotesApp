@@ -12,7 +12,7 @@ import altair as alt
 # ------------------------
 
 # Brand assets and colors
-LOGO_PATH = r"C:\Users\Usuario\OneDrive - FRUTTO FOODS\FRUTTOBRAND\Asset 7@4x.png"
+LOGO_PATH = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"  # Primary FruttoFoods green
 
 # Load data
@@ -62,7 +62,10 @@ col1, col2 = st.columns([3,1])
 with col1:
     st.title("FruttoFoods Quotation Tool")
 with col2:
-    st.image(LOGO_PATH, width=80)
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, width=80)
+    else:
+        st.warning("Logo no encontrado. Asegúrate de que 'data/Asset 7@4x.png' esté en el repositorio.")
 
 # Display results
 if g.empty:
