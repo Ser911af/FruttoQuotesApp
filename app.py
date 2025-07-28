@@ -32,24 +32,40 @@ df['price_per_unit'] = df['Price'] / df['volume_standard']
 
 # Sidebar filters
 st.sidebar.header("Quotation Filters")
-product = st.sidebar.selectbox("Product", sorted(df['Product'].dropna().unique()))
-location = st.sidebar.selectbox("Location", ['All'] + sorted(df['Location'].dropna().unique()))
-organic = st.sidebar.selectbox("Organic Status", ['All', 'Conventional', 'Organic'])
-volume_unit = st.sidebar.selectbox("Volume Unit", ['All'] + sorted(df['volume_unit'].unique()))
+product = st.sidebar.selectbox(
+    "Product",
+    sorted(df['Product'].dropna().unique())
+)
+# Ahora permitimos múltiples locaciones
+locations = st.sidebar.multiselect(
+    "Location",
+    options=sorted(df['Location'].dropna().unique()),
+    default=sorted(df['Location'].dropna().unique())
+)
+organic = st.sidebar.selectbox(
+    "Organic Status",
+    ['All', 'Conventional', 'Organic']
+)
+volume_unit = st.sidebar.selectbox(
+    "Volume Unit",
+    ['All'] + sorted(df['volume_unit'].unique())
+)
 
 def organic_to_num(val):
-    if val == 'Conventional':
-        return 0
-    if val == 'Organic':
-        return 1
+    if val == 'Conventional': return 0
+    if val == 'Organic': return 1
     return None
 
 # Apply filters
 g = df[df['Product'] == product]
-if location != 'All':
-    g = g[g['Location'] == location]
+
+# Filtrar por varias locaciones
+if locations:
+    g = g[g['Location'].isin(locations)]
+
 if organic != 'All':
     g = g[g['Organic'] == organic_to_num(organic)]
+
 if volume_unit != 'All':
     g = g[g['volume_unit'] == volume_unit]
 
@@ -67,7 +83,6 @@ with col2:
 if g.empty:
     st.warning("No hay datos para los filtros seleccionados.")
 else:
-    # Table con encabezados amigables
     display = g.rename(columns={
         'Product': 'Product',
         'Location': 'Location',
@@ -79,7 +94,6 @@ else:
     st.subheader("Filtered Quotations")
     st.dataframe(display)
 
-    # Métricas clave
     st.subheader("Key Metrics")
     min_val = g['price_per_unit'].min()
     max_val = g['price_per_unit'].max()
@@ -89,7 +103,6 @@ else:
     c2.metric("Max Price/Unit", f"${max_val:.2f}")
     c3.metric("Avg Price/Unit", f"${avg_val:.2f}")
 
-    # Gráfico de precio medio por vendor
     st.subheader("Average Price/Unit by Vendor")
     avg_vendor = g.groupby('VendorClean')['price_per_unit'].mean().reset_index()
     chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
@@ -98,6 +111,5 @@ else:
     )
     st.altair_chart(chart, use_container_width=True)
 
-    # Recomendación: vendor con mayor precio por unidad
     best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmax()]
     st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
