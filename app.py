@@ -23,7 +23,7 @@ else:
     st.error(f"Archivo no encontrado: {DATA_PATH}")
     st.stop()
 
-# Parsear y limpiar fechas
+# Parsear fechas
 df['cotization_date'] = pd.to_datetime(df['cotization_date'], errors='coerce')
 
 # Limpieza y cálculo price_per_unit
@@ -60,13 +60,10 @@ locations = st.sidebar.multiselect(
 sub = df[df['Product'] == product]
 if locations:
     sub = sub[sub['Location'].isin(locations)]
-org_vals = sub['Organic'].dropna().unique().tolist()
-org_map = {0: 'Conventional', 1: 'Organic'}
-org_options = ['All'] + [org_map[o] for o in sorted(org_vals)]
-organic = st.sidebar.selectbox(
-    "Organic Status",
-    org_options
-)
+org_vals   = sub['Organic'].dropna().unique().tolist()
+org_map    = {0: 'Conventional', 1: 'Organic'}
+org_options= ['All'] + [org_map[o] for o in sorted(org_vals)]
+organic    = st.sidebar.selectbox("Organic Status", org_options)
 
 # 4) Volume Unit dinámico
 sub2 = sub.copy()
@@ -77,29 +74,6 @@ volume_unit = st.sidebar.selectbox(
     "Volume Unit",
     ['All'] + vu_opts
 )
-
-# 5) Date range robusto
-# Tomar solo fechas válidas
-valid_dates = df['cotization_date'].dropna().dt.date
-if not valid_dates.empty:
-    min_date = valid_dates.min()
-    max_date = valid_dates.max()
-else:
-    st.error("No hay fechas válidas en los datos.")
-    st.stop()
-
-date_range = st.sidebar.date_input(
-    "Rango de Fecha",
-    value=[min_date, max_date],
-    min_value=min_date,
-    max_value=max_date
-)
-
-# Normalizar salida de date_input en start_date, end_date
-if isinstance(date_range, (tuple, list)):
-    start_date, end_date = date_range[0], date_range[-1]
-else:
-    start_date = end_date = date_range
 
 # ------------------------
 # Aplicar filtros
@@ -114,13 +88,6 @@ if organic != 'All':
 
 if volume_unit != 'All':
     g = g[g['volume_unit'] == volume_unit]
-
-# Filtrar rango de fecha, ignorando NaT
-mask_date = (
-    g['cotization_date'].notna() &
-    g['cotization_date'].dt.date.between(start_date, end_date)
-)
-g = g[mask_date]
 
 # ------------------------
 # Layout y logo
@@ -150,12 +117,12 @@ else:
         'VendorClean': 'Vendor'
     })[['Date','Product','Location','Volume Unit','Price per Unit','Vendor']]
 
-    # Formatear Date dd/mm/yy
+    # Formatear Date como dd/mm/yy
     display['Date'] = display['Date'].dt.strftime("%d/%m/%y")
-    # Formatear price
+    # Formatear Price per Unit
     display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
 
-    # Ordenar de más reciente a más antiguo, luego Vendor
+    # Ordenar de más reciente a más antiguo y luego por Vendor
     display = display.sort_values(by=['Date','Vendor'], ascending=[False, True])
 
     st.subheader("Filtered Quotations")
@@ -171,7 +138,7 @@ else:
     c2.metric("Max Price/Unit", f"${max_val:.2f}")
     c3.metric("Avg Price/Unit", f"${avg_val:.2f}")
 
-    # Gráfico medio por vendor
+    # Gráfico de precio medio por vendor
     st.subheader("Average Price/Unit by Vendor")
     avg_vendor = g.groupby('VendorClean')['price_per_unit'].mean().reset_index()
     chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
@@ -180,6 +147,6 @@ else:
     )
     st.altair_chart(chart, use_container_width=True)
 
-    # Recomendación: vendor más barato (min price_per_unit)
+    # Recomendación: vendor más barato (min precio por unidad)
     best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
     st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
