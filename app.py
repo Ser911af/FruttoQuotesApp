@@ -9,7 +9,7 @@ import altair as alt
 
 LOGO_PATH   = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"
-DATA_PATH   = "data/market_cleaned_cleaned.xlsx"
+GSHEET_URL = "https://docs.google.com/spreadsheets/d/12_oe7tQp9nbqAs1ccdPcG8kBUjiTqL7xbkBVUfiH0b4/export?format=csv"
 
 def organic_to_num(val):
     if val == 'Conventional': return 0
@@ -17,10 +17,10 @@ def organic_to_num(val):
     return None
 
 # Carga de datos
-if os.path.exists(DATA_PATH):
-    df = pd.read_excel(DATA_PATH)
-else:
-    st.error(f"Archivo no encontrado: {DATA_PATH}")
+try:
+    df = pd.read_csv(GSHEET_URL)
+except Exception as e:
+    st.error(f"No se pudo cargar la Google Sheet: {e}")
     st.stop()
 
 # Parsear fechas
