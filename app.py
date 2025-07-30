@@ -120,16 +120,21 @@ else:
         'volume_unit': 'Volume Unit',
         'price_per_unit': 'Price per Unit',
         'VendorClean': 'Vendor'
-    })[['Date','Product','Location','Volume Unit','Price per Unit','Vendor']]
+    })[['Date', 'Product', 'Location', 'Volume Unit', 'Price per Unit', 'Vendor']]
 
-    # Formatear Date como dd/mm/yy
-    display['Date'] = display['Date'].dt.strftime("%d/%m/%y")
+    # Convertir las fechas al formato datetime para asegurar un correcto orden
+    display['Date'] = pd.to_datetime(display['Date'], errors='coerce')
+
+    # Ordenar por fecha (de más reciente a más antiguo)
+    display = display.sort_values(by=['Date'], ascending=[False])
+
+    # Formatear Date como MM/DD/YYYY
+    display['Date'] = display['Date'].dt.strftime("%m/%d/%Y")
+
     # Formatear Price per Unit
     display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
 
-    # Ordenar de más reciente a más antiguo y luego por Vendor
-    display = display.sort_values(by=['Date','Vendor'], ascending=[False, True])
-
+    # Mostrar tabla ordenada
     st.subheader("Filtered Quotations")
     st.dataframe(display)
 
