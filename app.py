@@ -42,7 +42,7 @@ df['price_per_unit'] = df['Price'] / df['volume_standard']
 # ------------------------
 st.sidebar.header("Quotation Filters")
 
-# 1) Products
+# 1) Products (Ahora multiselect)
 products = st.sidebar.multiselect(
     "Products",
     options=sorted(df['Product'].dropna().unique()),
@@ -50,7 +50,7 @@ products = st.sidebar.multiselect(
 )
 
 # 2) Location dinámico
-locs_for_product = df[df['Product'] == product]['Location'].dropna().unique()
+locs_for_product = df[df['Product'].isin(products)]['Location'].dropna().unique()
 locations = st.sidebar.multiselect(
     "Location",
     options=sorted(locs_for_product),
@@ -58,7 +58,7 @@ locations = st.sidebar.multiselect(
 )
 
 # 3) Organic Status dinámico
-sub = df[df['Product'] == product]
+sub = df[df['Product'].isin(products)]
 if locations:
     sub = sub[sub['Location'].isin(locations)]
 org_vals   = sub['Organic'].dropna().unique().tolist()
@@ -79,7 +79,11 @@ volume_unit = st.sidebar.selectbox(
 # ------------------------
 # Aplicar filtros
 # ------------------------
-g = df[df['Product'].isin(products)]  # Filtrar por varios productos
+# Si no se selecciona ningún producto, se muestra todo el dataframe
+if not products:
+    g = df
+else:
+    g = df[df['Product'].isin(products)]  # Filtrar por los productos seleccionados
 
 if locations:
     g = g[g['Location'].isin(locations)]
@@ -89,7 +93,7 @@ if organic != 'All':
 
 if volume_unit != 'All':
     g = g[g['volume_unit'] == volume_unit]
-    
+
 # ------------------------
 # Layout y logo
 # ------------------------
