@@ -42,10 +42,11 @@ df['price_per_unit'] = df['Price'] / df['volume_standard']
 # ------------------------
 st.sidebar.header("Quotation Filters")
 
-# 1) Product
-product = st.sidebar.selectbox(
-    "Product",
-    sorted(df['Product'].dropna().unique())
+# 1) Products
+products = st.sidebar.multiselect(
+    "Products",
+    options=sorted(df['Product'].dropna().unique()),
+    default=sorted(df['Product'].dropna().unique())  # por defecto, todos los productos están seleccionados
 )
 
 # 2) Location dinámico
@@ -78,7 +79,7 @@ volume_unit = st.sidebar.selectbox(
 # ------------------------
 # Aplicar filtros
 # ------------------------
-g = df[df['Product'] == product]
+g = df[df['Product'].isin(products)]  # Filtrar por varios productos
 
 if locations:
     g = g[g['Location'].isin(locations)]
@@ -88,7 +89,7 @@ if organic != 'All':
 
 if volume_unit != 'All':
     g = g[g['volume_unit'] == volume_unit]
-
+    
 # ------------------------
 # Layout y logo
 # ------------------------
