@@ -1,3 +1,5 @@
+st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
+
 import streamlit as st
 import os
 
