@@ -313,64 +313,89 @@ with tab1:
 with tab2:
     st.header("🔥💥💰 Daily Sheet (Vista del día) 💰💥🔥")
 
-    # Fecha por defecto = la más reciente disponible
-    _dates = pd.to_datetime(df["cotization_date"], errors="coerce")
-    default_date = _dates.max().date() if not _dates.dropna().empty else pd.Timestamp.today().date()
-    sel_date = st.date_input("Fecha a mostrar", value=default_date)
-
-    # Base del día
-    day_df = df[pd.to_datetime(df["cotization_date"], errors="coerce").dt.date == sel_date].copy()
-    if day_df.empty:
-        st.info("No hay cotizaciones para la fecha seleccionada.")
-        st.stop()
-
-    # Derivados para la vista
-    day_df["Shipper"] = day_df["VendorClean"]
-    day_df["OG/CV"]   = day_df["Organic"].map(_ogcv)
-    day_df["Where"]   = day_df["Location"]
-    day_df["Size"]    = day_df["Product"].apply(_size_from_product)
-    day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
-    day_df["Price$"]  = day_df["Price"].apply(_format_price)
-    day_df["Family"]  = day_df["Product"].apply(_family_from_product)
-
-    # Filtros de la vista del día
-    cols = st.columns(4)
-    with cols[0]:
-        fams = ["Tomato","Soft Squash","Cucumbers","Bell Peppers","Others"]
-        sel_fams = st.multiselect("Familias", options=fams, default=fams)
-    with cols[1]:
-        locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if x != ""])
-        sel_locs = st.multiselect("Ubicaciones", options=locs, default=locs)
-    with cols[2]:
-        search = st.text_input("Buscar producto (contiene)", "")
-    with cols[3]:
-        sort_opt = st.selectbox("Ordenar por", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
-
-    # Aplicar filtros
-    day_df = day_df[day_df["Family"].isin(sel_fams)]
-    if sel_locs:
-        day_df = day_df[day_df["Where"].isin(sel_locs)]
-    if search.strip():
-        s = search.strip().lower()
-        day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
-
-    # Orden
-    if sort_opt == "Price (asc)":
-        day_df = day_df.sort_values("Price", ascending=True)
-    elif sort_opt == "Price (desc)":
-        day_df = day_df.sort_values("Price", ascending=False)
+    # Si no hay ninguna fecha parseable, avisamos y salimos del tab sin cortar la app
+    if df["_date"].dropna().empty:
+        st.info("No se pudo interpretar ninguna fecha en 'cotization_date'. Revisa el formato (M/D/YYYY).")
     else:
-        day_df = day_df.sort_values(sort_opt)
+        default_date = max(d for d in df["_date"] if pd.notna(d))
+        sel_date = st.date_input("Fecha a mostrar", value=default_date)
 
-    # Vista final (único grid)
-    show = day_df[["Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
-    st.dataframe(show, use_container_width=True)
+        # Base del día usando la columna ya preparada
+        day_df = df[df["_date"] == sel_date].copy()
 
-    # Descarga CSV de la vista del día
-    csv_bytes = show.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "⬇️ Descargar CSV (vista del día)",
-        data=csv_bytes,
-        file_name=f"daily_sheet_{sel_date}.csv",
-        mime="text/csv"
-    )
+        # Si no hay filas de ese día, mostramos aviso pero NO detenemos la app
+        if day_df.empty:
+            st.warning("No hay cotizaciones para la fecha seleccionada.")
+        else:
+            # Derivados para la vista
+            day_df["Shipper"] = day_df["VendorClean"]
+            day_df["OG/CV"]   = day_df["Organic"].apply(lambda x: "OG" if pd.notna(x) and int(x)==1 else ("CV" if pd.notna(x) and int(x)==0 else ""))
+            day_df["Where"]   = day_df["Location"]
+            # Size desde el texto del producto (si no tienes columna size real)
+            _size_regex = re.compile(r"(\d+\s?lb|\d+\s?ct|\d+\s?[xX]\s?\d+|bulk|jbo|xl|lg|med|fancy|4x4|4x5|5x5|60cs)", re.IGNORECASE)
+            day_df["Size"]    = day_df["Product"].apply(lambda p: (_size_regex.search(p).group(1) if isinstance(p,str) and _size_regex.search(p) else ""))
+            # Volume
+            def _volume_str(row):
+                q = row.get("volume_num")
+                u = row.get("volume_unit") or ""
+                try:
+                    q = float(q); q = int(q) if float(q).is_integer() else q
+                except Exception:
+                    q = ""
+                return f"{q} {u}".strip()
+            day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
+            # Price formateado
+            day_df["Price$"]  = day_df["Price"].apply(lambda x: f"${float(x):,.2f}" if pd.notna(x) else "")
+
+            # Familia (para filtrar)
+            def _family_from_product(p: str) -> str:
+                s = (p or "").lower()
+                if any(k in s for k in ["tomato", "roma", "round", "grape"]): return "Tomato"
+                if any(k in s for k in ["squash", "zucchini", "gray"]):       return "Soft Squash"
+                if "cucumber" in s or "cuke" in s:                            return "Cucumbers"
+                if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano"]): return "Bell Peppers"
+                return "Others"
+            day_df["Family"]  = day_df["Product"].apply(_family_from_product)
+
+            # Filtros del grid
+            cols = st.columns(4)
+            with cols[0]:
+                fams = ["Tomato","Soft Squash","Cucumbers","Bell Peppers","Others"]
+                sel_fams = st.multiselect("Familias", options=fams, default=fams)
+            with cols[1]:
+                locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if x != ""])
+                sel_locs = st.multiselect("Ubicaciones", options=locs, default=locs)
+            with cols[2]:
+                search = st.text_input("Buscar producto (contiene)", "")
+            with cols[3]:
+                sort_opt = st.selectbox("Ordenar por", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
+
+            # Aplicar filtros
+            day_df = day_df[day_df["Family"].isin(sel_fams)]
+            if sel_locs:
+                day_df = day_df[day_df["Where"].isin(sel_locs)]
+            if search.strip():
+                s = search.strip().lower()
+                day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
+
+            # Orden
+            if sort_opt == "Price (asc)":
+                day_df = day_df.sort_values("Price", ascending=True)
+            elif sort_opt == "Price (desc)":
+                day_df = day_df.sort_values("Price", ascending=False)
+            else:
+                day_df = day_df.sort_values(sort_opt)
+
+            # Grid final
+            show = day_df[["Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
+            st.dataframe(show, use_container_width=True)
+
+            # Descarga CSV
+            csv_bytes = show.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Descargar CSV (vista del día)",
+                data=csv_bytes,
+                file_name=f"daily_sheet_{sel_date}.csv",
+                mime="text/csv"
+            )
+
