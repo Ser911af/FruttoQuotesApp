@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import altair as alt
+import re
 
 # ------------------------
 # FruttoFoods Quotation Tool (Supabase Edition)
@@ -36,7 +37,7 @@ def fetch_all_quotations_from_supabase():
     try:
         SUPABASE_URL = st.secrets["SUPABASE_URL"]
         SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
-    except Exception as e:
+    except Exception:
         st.error("No encontré SUPABASE_URL y/o SUPABASE_ANON_KEY en secrets. Revísalos.")
         st.stop()
 
@@ -85,7 +86,7 @@ def fetch_all_quotations_from_supabase():
     # Fechas ("M/D/YYYY" como texto en la tabla) -> datetime
     df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
 
-    # Organic 0/1 (num) -> creamos columna 'Organic' (numérica) para la UI
+    # Organic 0/1 (num) -> 'Organic' (numérica) para la UI
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
 
     # Price a num
@@ -118,6 +119,52 @@ def fetch_all_quotations_from_supabase():
 
     return df
 
+# ===== Helpers para Daily Sheet =====
+_size_regex = re.compile(
+    r"(\d+\s?lb|\d+\s?ct|\d+\s?[xX]\s?\d+|bulk|jbo|xl|lg|med|fancy|4x4|4x5|5x5|60cs)",
+    flags=re.IGNORECASE
+)
+
+def _family_from_product(p: str) -> str:
+    s = (p or "").lower()
+    if any(k in s for k in ["tomato", "roma", "round", "grape"]):
+        return "Tomato"
+    if any(k in s for k in ["squash", "zucchini", "gray"]):
+        return "Soft Squash"
+    if "cucumber" in s or "cuke" in s:
+        return "Cucumbers"
+    if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano"]):
+        return "Bell Peppers"
+    return "Others"
+
+def _size_from_product(p: str) -> str:
+    p = p or ""
+    m = _size_regex.search(p)
+    return m.group(1) if m else ""
+
+def _ogcv(x) -> str:
+    try:
+        xi = int(x)
+        return "OG" if xi == 1 else "CV" if xi == 0 else ""
+    except Exception:
+        s = str(x).strip().lower()
+        return "OG" if s in ("organic","org","1","true","sí","si","yes","y") else "CV" if s in ("conventional","conv","0","false","no","n") else ""
+
+def _volume_str(row) -> str:
+    q = row.get("volume_num")
+    u = row.get("volume_unit") or ""
+    try:
+        q = float(q)
+        q = int(q) if q.is_integer() else q
+    except Exception:
+        q = ""
+    return f"{q} {u}".strip()
+
+def _format_price(x) -> str:
+    try:
+        return f"${float(x):,.2f}"
+    except Exception:
+        return ""
 
 # ------------------------
 # Carga de datos (desde Supabase)
@@ -168,23 +215,6 @@ vu_opts = sorted([v for v in sub2['volume_unit'].dropna().unique().tolist() if v
 volume_unit = st.sidebar.selectbox("Volume Unit", ['All'] + vu_opts)
 
 # ------------------------
-# Aplicar filtros
-# ------------------------
-if not products:
-    g = df.copy()
-else:
-    g = df[df['Product'].isin(products)]
-
-if locations:
-    g = g[g['Location'].isin(locations)]
-
-if organic != 'All':
-    g = g[g['Organic'] == organic_to_num(organic)]
-
-if volume_unit != 'All':
-    g = g[g['volume_unit'] == volume_unit]
-
-# ------------------------
 # Layout y logo
 # ------------------------
 col1, col2 = st.columns([3, 1])
@@ -197,55 +227,150 @@ with col2:
         st.warning("Logo no encontrado. Verifica 'data/Asset 7@4x.png'.")
 
 # ------------------------
-# Mostrar resultados
+# Tabs: Explorer + Daily Sheet
 # ------------------------
-if g.empty:
-    st.warning("No hay datos para los filtros seleccionados.")
-else:
-    # Preparar tabla para display
-    display = g.rename(columns={
-        'cotization_date': 'Date',
-        'volume_unit': 'Volume Unit',
-        'price_per_unit': 'Price per Unit',
-        'VendorClean': 'Vendor'
-    })[['Date', 'Product', 'Location', 'Volume Unit', 'Price per Unit', 'Vendor']]
+tab1, tab2 = st.tabs(["Explorer", "Daily Sheet"])
 
-    # Asegurar datetime y ordenar
-    display['Date'] = pd.to_datetime(display['Date'], errors='coerce')
-    display = display.sort_values(by=['Date'], ascending=[False])
+# ------------------------
+# Tab 1: Explorer (tu vista actual)
+# ------------------------
+with tab1:
 
-    # Formatos
-    display['Date'] = display['Date'].dt.strftime("%m/%d/%Y")
-    display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
-
-    st.subheader("Filtered Quotations")
-    st.dataframe(display, use_container_width=True)
-
-    # Métricas clave
-    st.subheader("Key Metrics")
-    min_val = g['price_per_unit'].min()
-    max_val = g['price_per_unit'].max()
-    avg_val = g['price_per_unit'].mean()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Min Price/Unit", f"${min_val:.2f}")
-    c2.metric("Max Price/Unit", f"${max_val:.2f}")
-    c3.metric("Avg Price/Unit", f"${avg_val:.2f}")
-
-    # Gráfico de precio medio por vendor
-    st.subheader("Average Price/Unit by Vendor")
-    if not g['VendorClean'].dropna().empty:
-        avg_vendor = g.groupby('VendorClean', dropna=True)['price_per_unit'].mean().reset_index()
-        if not avg_vendor.empty:
-            chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
-                x=alt.X('VendorClean:N', title='Vendor', sort='-y'),
-                y=alt.Y('price_per_unit:Q', title='Avg Price/Unit')
-            )
-            st.altair_chart(chart, use_container_width=True)
-
-            # Recomendación: vendor más barato
-            best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
-            st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
-        else:
-            st.info("No hay datos agregables por Vendor con los filtros actuales.")
+    # ------------------------
+    # Aplicar filtros
+    # ------------------------
+    if not products:
+        g = df.copy()
     else:
-        st.info("No hay Vendors en el conjunto filtrado.")
+        g = df[df['Product'].isin(products)]
+
+    if locations:
+        g = g[g['Location'].isin(locations)]
+
+    if organic != 'All':
+        g = g[g['Organic'] == organic_to_num(organic)]
+
+    if volume_unit != 'All':
+        g = g[g['volume_unit'] == volume_unit]
+
+    # ------------------------
+    # Mostrar resultados
+    # ------------------------
+    if g.empty:
+        st.warning("No hay datos para los filtros seleccionados.")
+    else:
+        # Preparar tabla para display
+        display = g.rename(columns={
+            'cotization_date': 'Date',
+            'volume_unit': 'Volume Unit',
+            'price_per_unit': 'Price per Unit',
+            'VendorClean': 'Vendor'
+        })[['Date', 'Product', 'Location', 'Volume Unit', 'Price per Unit', 'Vendor']]
+
+        # Asegurar datetime y ordenar
+        display['Date'] = pd.to_datetime(display['Date'], errors='coerce')
+        display = display.sort_values(by=['Date'], ascending=[False])
+
+        # Formatos
+        display['Date'] = display['Date'].dt.strftime("%m/%d/%Y")
+        display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
+
+        st.subheader("Filtered Quotations")
+        st.dataframe(display, use_container_width=True)
+
+        # Métricas clave
+        st.subheader("Key Metrics")
+        min_val = g['price_per_unit'].min()
+        max_val = g['price_per_unit'].max()
+        avg_val = g['price_per_unit'].mean()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Min Price/Unit", f"${min_val:.2f}")
+        c2.metric("Max Price/Unit", f"${max_val:.2f}")
+        c3.metric("Avg Price/Unit", f"${avg_val:.2f}")
+
+        # Gráfico de precio medio por vendor
+        st.subheader("Average Price/Unit by Vendor")
+        if not g['VendorClean'].dropna().empty:
+            avg_vendor = g.groupby('VendorClean', dropna=True)['price_per_unit'].mean().reset_index()
+            if not avg_vendor.empty:
+                chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
+                    x=alt.X('VendorClean:N', title='Vendor', sort='-y'),
+                    y=alt.Y('price_per_unit:Q', title='Avg Price/Unit')
+                )
+                st.altair_chart(chart, use_container_width=True)
+
+                # Recomendación: vendor más barato
+                best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
+                st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
+            else:
+                st.info("No hay datos agregables por Vendor con los filtros actuales.")
+        else:
+            st.info("No hay Vendors en el conjunto filtrado.")
+
+# ------------------------
+# Tab 2: Daily Sheet (único grid + filtros)
+# ------------------------
+with tab2:
+    st.header("🔥💥💰 Daily Sheet (Vista del día) 💰💥🔥")
+
+    # Fecha por defecto = la más reciente disponible
+    _dates = pd.to_datetime(df["cotization_date"], errors="coerce")
+    default_date = _dates.max().date() if not _dates.dropna().empty else pd.Timestamp.today().date()
+    sel_date = st.date_input("Fecha a mostrar", value=default_date)
+
+    # Base del día
+    day_df = df[pd.to_datetime(df["cotization_date"], errors="coerce").dt.date == sel_date].copy()
+    if day_df.empty:
+        st.info("No hay cotizaciones para la fecha seleccionada.")
+        st.stop()
+
+    # Derivados para la vista
+    day_df["Shipper"] = day_df["VendorClean"]
+    day_df["OG/CV"]   = day_df["Organic"].map(_ogcv)
+    day_df["Where"]   = day_df["Location"]
+    day_df["Size"]    = day_df["Product"].apply(_size_from_product)
+    day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
+    day_df["Price$"]  = day_df["Price"].apply(_format_price)
+    day_df["Family"]  = day_df["Product"].apply(_family_from_product)
+
+    # Filtros de la vista del día
+    cols = st.columns(4)
+    with cols[0]:
+        fams = ["Tomato","Soft Squash","Cucumbers","Bell Peppers","Others"]
+        sel_fams = st.multiselect("Familias", options=fams, default=fams)
+    with cols[1]:
+        locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if x != ""])
+        sel_locs = st.multiselect("Ubicaciones", options=locs, default=locs)
+    with cols[2]:
+        search = st.text_input("Buscar producto (contiene)", "")
+    with cols[3]:
+        sort_opt = st.selectbox("Ordenar por", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
+
+    # Aplicar filtros
+    day_df = day_df[day_df["Family"].isin(sel_fams)]
+    if sel_locs:
+        day_df = day_df[day_df["Where"].isin(sel_locs)]
+    if search.strip():
+        s = search.strip().lower()
+        day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
+
+    # Orden
+    if sort_opt == "Price (asc)":
+        day_df = day_df.sort_values("Price", ascending=True)
+    elif sort_opt == "Price (desc)":
+        day_df = day_df.sort_values("Price", ascending=False)
+    else:
+        day_df = day_df.sort_values(sort_opt)
+
+    # Vista final (único grid)
+    show = day_df[["Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
+    st.dataframe(show, use_container_width=True)
+
+    # Descarga CSV de la vista del día
+    csv_bytes = show.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "⬇️ Descargar CSV (vista del día)",
+        data=csv_bytes,
+        file_name=f"daily_sheet_{sel_date}.csv",
+        mime="text/csv"
+    )
