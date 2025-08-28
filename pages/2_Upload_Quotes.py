@@ -241,9 +241,9 @@ if pasted:
         with st.expander("Ver advertencias antes de subir"):
             for p in problems_preview:
                 st.warning(p)
-        allow_upload_now = st.checkbox("Entiendo las advertencias y deseo subir de todos modos", value=False)
+        allow_upload_now = st.checkbox("Entiendo las advertencias y deseo subir de todos modos", value=False, key="allow_upload_now_cb")
 
-    if st.button("⬆️ Subir estas filas ahora", type="primary", disabled=not allow_upload_now):
+    if st.button("⬆️ Subir estas filas ahora", type="primary", disabled=not allow_upload_now, key="upload_now_main"):
         with st.spinner("Subiendo a Supabase..."):
             msg = upload_to_supabase_for_quotations(norm_df)
         (st.success if msg.startswith("Subida completa") else st.error)(msg)
