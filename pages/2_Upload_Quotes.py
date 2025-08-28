@@ -161,6 +161,94 @@ if pasted:
 
     # 3b) Acción inmediata: subir justo después de visualizar
     st.markdown("---")
+    st.subheader("4) Subir estas filas ahora → tabla `quotations`")
+    st.caption("Usa anon key con RLS. Se hace upsert usando TODAS las columnas de negocio como clave de conflicto.")
+
+    def _get_secret(name: str):
+        try:
+            return st.secrets[name]
+        except Exception:
+            return os.getenv(name)
+
+    # ===== Helpers específicos para 'quotations' =====
+    def _to_mmddyyyy_text(d):
+        if pd.isna(d):
+            return None
+        try:
+            return pd.to_datetime(d).strftime("%-m/%-d/%Y")  # Unix/Mac
+        except Exception:
+            return pd.to_datetime(d).strftime("%#m/%#d/%Y")  # Windows
+
+    def _parse_volume_fields(vol_raw: pd.Series):
+        s = vol_raw.astype(str).str.strip()
+        num = s.str.extract(r"([0-9]+(?:\.[0-9]+)?)", expand=False).astype(float)
+        unit = s.str.extract(r"(CS|CT|CTN|P|PLT|LOAD|LB|KG|BOX|CASE|EA)", expand=False, flags=re.IGNORECASE)
+        unit = unit.str.upper()
+        std = unit.fillna("UNIT")
+        num = num.where(~unit.eq("LOAD"), None)
+        return num, unit, std
+
+    def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
+        out = pd.DataFrame()
+        out["cotization_date"] = df_norm["Date"].apply(_to_mmddyyyy_text)
+        ogcv = df_norm["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
+        out["organic"] = (ogcv == "OG").astype(int)
+        out["product"] = df_norm["Product"]
+        out["price"] = df_norm["Price"]
+        out["location"] = df_norm["Where"]
+        out["concat"] = df_norm["Concat"]
+        vol_num, vol_unit, vol_std = _parse_volume_fields(df_norm["Volume"])
+        out["volume_num"] = vol_num
+        out["volume_unit"] = vol_unit
+        out["volume_standard"] = vol_std
+        out["vendorclean"] = df_norm["Supplier"].astype(str).str.strip()
+        out["source_chat_id"] = None
+        out["source_message_id"] = None
+        cols = [
+            "cotization_date","organic","product","price","location","concat",
+            "volume_num","volume_unit","volume_standard","vendorclean",
+            "source_chat_id","source_message_id"
+        ]
+        return out[cols]
+
+    def upload_to_supabase_for_quotations(df_norm: pd.DataFrame) -> str:
+        url = _get_secret("SUPABASE_URL")
+        key = _get_secret("SUPABASE_KEY")
+        table_name = os.getenv("SUPABASE_TABLE", "quotations")
+        if not url or not key:
+            return "Faltan SUPABASE_URL o SUPABASE_KEY (en st.secrets o variables de entorno)."
+        if create_client is None:
+            return "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
+        client = create_client(url, key)
+        df_q = _normalize_to_quotations(df_norm)
+        records = df_q.where(pd.notnull(df_q), None).to_dict(orient="records")
+        try:
+            client.table(table_name).upsert(
+                records,
+                on_conflict=(
+                    "cotization_date,organic,product,price,location,concat,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "source_chat_id,source_message_id"
+                )
+            ).execute()
+            return f"Subida completa: {len(records)} filas a '{table_name}'."
+        except Exception as e:
+            return f"Error al subir: {e}"
+
+    problems_preview = _validate(norm_df)
+    allow_upload_now = True
+    if problems_preview:
+        with st.expander("Ver advertencias antes de subir"):
+            for p in problems_preview:
+                st.warning(p)
+        allow_upload_now = st.checkbox("Entiendo las advertencias y deseo subir de todos modos", value=False)
+
+    if st.button("⬆️ Subir estas filas ahora", type="primary", disabled=not allow_upload_now):
+        with st.spinner("Subiendo a Supabase..."):
+            msg = upload_to_supabase_for_quotations(norm_df)
+        (st.success if msg.startswith("Subida completa") else st.error)(msg)
+
+    st.markdown("---")
     st.subheader("4) Subir estas filas ahora")
     st.caption("Si prefieres, puedes subir de inmediato. Si hay advertencias de validación, marca la confirmación.")
 
