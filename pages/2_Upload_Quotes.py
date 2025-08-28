@@ -19,6 +19,70 @@ st.set_page_config(page_title="Upload Quotes — Paste Mode", page_icon="📋", 
 st.title("📋 Ingesta de Cotizaciones (pegar desde portapapeles)")
 st.caption("Pega tus cotizaciones tal cual salen de Excel/Email/Sheets. Valido, normalizo y subo a la base.")
 
+# =====================
+# Diagnóstico rápido de credenciales + prueba
+# =====================
+with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
+    def _get_secret(name: str):
+        try:
+            return st.secrets[name]
+        except Exception:
+            return os.getenv(name)
+
+    url_probe = _get_secret("SUPABASE_URL")
+    key_probe = _get_secret("SUPABASE_KEY")
+    table_probe = os.getenv("SUPABASE_TABLE", st.secrets.get("SUPABASE_TABLE", "quotations")) if hasattr(st, "secrets") else os.getenv("SUPABASE_TABLE", "quotations")
+
+    st.write("URL presente:", bool(url_probe))
+    st.write("KEY presente:", bool(key_probe))
+    st.write("Tabla destino:", table_probe)
+
+    def _to_mmddyyyy_text(d):
+        if pd.isna(d):
+            return None
+        try:
+            return pd.to_datetime(d).strftime("%-m/%-d/%Y")
+        except Exception:
+            return pd.to_datetime(d).strftime("%#m/%#d/%Y")
+
+    def _test_insert_row():
+        if not url_probe or not key_probe:
+            return False, "Faltan SUPABASE_URL o SUPABASE_KEY (en st.secrets o variables de entorno)."
+        if create_client is None:
+            return False, "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
+        client = create_client(url_probe, key_probe)
+        now = pd.Timestamp.utcnow().tz_localize(None)
+        payload = [{
+            "cotization_date": _to_mmddyyyy_text(now.date()),
+            "organic": 0,
+            "product": "_probe_streamlit_",
+            "price": 0.01,
+            "location": "diagnostic",
+            "concat": f"diag-{int(now.timestamp())}",
+            "volume_num": None,
+            "volume_unit": None,
+            "volume_standard": None,
+            "vendorclean": "_probe_vendor_",
+            "source_chat_id": "streamlit",
+            "source_message_id": str(int(now.timestamp()))
+        }]
+        try:
+            client.table(table_probe).upsert(
+                payload,
+                on_conflict=(
+                    "cotization_date,organic,product,price,location,concat,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "source_chat_id,source_message_id"
+                )
+            ).execute()
+            return True, f"Inserción/Upsert OK en '{table_probe}'."
+        except Exception as e:
+            return False, f"Error al upsert: {e}"
+
+    if st.button("Probar conexión e insertar fila de diagnóstico", key="probe_btn"):
+        ok, msg = _test_insert_row()
+        (st.success if ok else st.error)(msg)
+
 # ------------------------
 # Helper functions
 # ------------------------
