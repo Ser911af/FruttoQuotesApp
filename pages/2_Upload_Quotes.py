@@ -38,13 +38,17 @@ with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
     st.write("KEY presente:", bool(key_probe))
     st.write("Tabla destino:", table_probe)
 
-    def _to_mmddyyyy_text(d):
+    def _to_mmddyy_text(d):
         if pd.isna(d):
             return None
         try:
-            return pd.to_datetime(d).strftime("%-m/%-d/%Y")
+            ts = pd.to_datetime(d, errors="coerce")
         except Exception:
-            return pd.to_datetime(d).strftime("%#m/%#d/%Y")
+            return None
+        if pd.isna(ts):
+            return None
+        # mmddyy sin separadores, por ejemplo 082525
+        return ts.strftime("%m%d%y")
 
     def _test_insert_row():
         if not url_probe or not key_probe:
@@ -54,7 +58,7 @@ with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
         client = create_client(url_probe, key_probe)
         now = pd.Timestamp.utcnow().tz_localize(None)
         payload = [{
-            "cotization_date": _to_mmddyyyy_text(now.date()),
+            "cotization_date": _to_mmddyy_text(now.date()),
             "organic": 0,
             "product": "_probe_streamlit_",
             "price": 0.01,
@@ -71,8 +75,8 @@ with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
             client.table(table_probe).upsert(
                 payload,
                 on_conflict=(
-                    "cotization_date,organic,product,price,location,concat,"
-                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "cotization_date,organic,product,price,location,concat,"\
+                    "volume_num,volume_unit,volume_standard,vendorclean,"\
                     "source_chat_id,source_message_id"
                 )
             ).execute()
@@ -236,13 +240,16 @@ if pasted:
             return os.getenv(name)
 
     # ===== Helpers específicos para 'quotations' =====
-    def _to_mmddyyyy_text(d):
+    def _to_mmddyy_text(d):
         if pd.isna(d):
             return None
         try:
-            return pd.to_datetime(d).strftime("%-m/%-d/%Y")  # Unix/Mac
+            ts = pd.to_datetime(d, errors="coerce")
         except Exception:
-            return pd.to_datetime(d).strftime("%#m/%#d/%Y")  # Windows
+            return None
+        if pd.isna(ts):
+            return None
+        return ts.strftime("%m%d%y")
 
     def _parse_volume_fields(vol_raw: pd.Series):
         s = vol_raw.astype(str).str.strip()
@@ -255,7 +262,7 @@ if pasted:
 
     def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
         out = pd.DataFrame()
-        out["cotization_date"] = df_norm["Date"].apply(_to_mmddyyyy_text)
+        out["cotization_date"] = df_norm["Date"].apply(_to_mmddyy_text)
         ogcv = df_norm["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
         out["organic"] = (ogcv == "OG").astype(int)
         out["product"] = df_norm["Product"]
@@ -286,15 +293,14 @@ if pasted:
             return "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
         client = create_client(url, key)
         df_q = _normalize_to_quotations(df_norm)
-        # Evitar NaN/NaT en JSON -> convertir todo a object y reemplazar por None
         df_q = df_q.astype(object).where(pd.notnull(df_q), None)
         records = df_q.to_dict(orient="records")
         try:
             client.table(table_name).upsert(
                 records,
                 on_conflict=(
-                    "cotization_date,organic,product,price,location,concat,"
-                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "cotization_date,organic,product,price,location,concat,"\
+                    "volume_num,volume_unit,volume_standard,vendorclean,"\
                     "source_chat_id,source_message_id"
                 )
             ).execute()
@@ -314,6 +320,5 @@ if pasted:
         with st.spinner("Subiendo a Supabase..."):
             msg = upload_to_supabase_for_quotations(norm_df)
         (st.success if msg.startswith("Subida completa") else st.error)(msg)
-    # (Se ha unificado el flujo de subida; este bloque duplicado fue eliminado)
     st.markdown("---")
     # Fin de la lógica de subida unificada
