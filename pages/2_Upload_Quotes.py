@@ -20,78 +20,75 @@ st.set_page_config(page_title="Upload Quotes — Paste Mode", page_icon="📋", 
 st.title("📋 Ingesta de Cotizaciones (pegar desde portapapeles)")
 st.caption("Pega tus cotizaciones tal cual salen de Excel/Email/Sheets. Valido, normalizo y subo a la base.")
 
-# =====================
-# Diagnóstico rápido de credenciales + prueba
-# =====================
-with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
-    def _get_secret(name: str):
-        try:
-            return st.secrets[name]
-        except Exception:
-            return os.getenv(name)
+# ------------------------
+# Utilidades globales
+# ------------------------
+def _get_secret(name: str):
+    try:
+        return st.secrets[name]
+    except Exception:
+        return os.getenv(name)
 
-    url_probe = _get_secret("SUPABASE_URL")
-    key_probe = _get_secret("SUPABASE_KEY")
-    table_probe = os.getenv("SUPABASE_TABLE", st.secrets.get("SUPABASE_TABLE", "quotations")) if hasattr(st, "secrets") else os.getenv("SUPABASE_TABLE", "quotations")
-
-    st.write("URL presente:", bool(url_probe))
-    st.write("KEY presente:", bool(key_probe))
-    st.write("Tabla destino:", table_probe)
-
-    def _to_mmddyy_text(d):
-        if pd.isna(d):
-            return None
-        try:
-            ts = pd.to_datetime(d, errors="coerce")
-        except Exception:
-            return None
-        if pd.isna(ts):
-            return None
-        # mmddyy sin separadores, por ejemplo 082525
-        return ts.strftime("%m%d%y")
-
-    def _test_insert_row():
-        if not url_probe or not key_probe:
-            return False, "Faltan SUPABASE_URL o SUPABASE_KEY (en st.secrets o variables de entorno)."
-        if create_client is None:
-            return False, "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
-        client = create_client(url_probe, key_probe)
-        now = pd.Timestamp.utcnow().tz_localize(None)
-        payload = [{
-            "cotization_date": _to_mmddyy_text(now.date()),
-            "organic": 0,
-            "product": "_probe_streamlit_",
-            "price": 0.01,
-            "location": "diagnostic",
-            "concat": f"diag-{int(now.timestamp())}",
-            "volume_num": None,
-            "volume_unit": None,
-            "volume_standard": None,
-            "vendorclean": "_probe_vendor_",
-            "source_chat_id": "streamlit",
-            "source_message_id": str(int(now.timestamp()))
-        }]
-        try:
-            client.table(table_probe).upsert(
-                payload,
-                on_conflict=(
-                    "cotization_date,organic,product,price,location,concat,"\
-                    "volume_num,volume_unit,volume_standard,vendorclean,"\
-                    "source_chat_id,source_message_id"
-                )
-            ).execute()
-            return True, f"Inserción/Upsert OK en '{table_probe}'."
-        except Exception as e:
-            return False, f"Error al upsert: {e}"
-
-    if st.button("Probar conexión e insertar fila de diagnóstico", key="probe_btn"):
-        ok, msg = _test_insert_row()
-        (st.success if ok else st.error)(msg)
+# Limpia cache al iniciar; útil si Streamlit conserva funciones viejas
+st.cache_data.clear()
+with st.sidebar:
+    if st.button("🔄 Limpiar caché"):
+        st.cache_data.clear()
+        st.success("Cache limpia. Presiona Rerun.")
 
 # ------------------------
 # Helper functions
 # ------------------------
 EXCEL_EPOCH = dt.date(1899, 12, 30)  # Excel date origin
+
+def _cot_date_to_mdy_text(val):
+    """
+    Devuelve siempre 'M/D/YYYY' como texto.
+    Acepta:
+      - pandas.Timestamp / datetime / date
+      - 'mmddyy' (p.ej. '082525')
+      - 'mm/dd/yy', 'mm/dd/yyyy', 'm/d/yyyy'
+      - seriales de Excel (int/float razonables)
+    """
+    if val is None or (isinstance(val, float) and pd.isna(val)) or (isinstance(val, str) and val.strip() == ""):
+        return None
+
+    # 1) pandas datetime-like directo
+    try:
+        ts = pd.to_datetime(val, errors="raise")
+        if not pd.isna(ts):
+            ts = ts.to_pydatetime()
+            return f"{ts.month}/{ts.day}/{ts.year}"
+    except Exception:
+        pass
+
+    # 2) string 'mmddyy' exacto (6 dígitos)
+    if isinstance(val, str) and re.fullmatch(r"\d{6}", val):
+        mm  = int(val[0:2])
+        dd  = int(val[2:4])
+        yy  = int(val[4:6])
+        yyyy = 2000 + yy  # mapea 00-99 a 2000-2099
+        d = dt.date(yyyy, mm, dd)
+        return f"{d.month}/{d.day}/{d.year}"
+
+    # 3) serial de Excel
+    if isinstance(val, (int, float)) and not pd.isna(val):
+        try:
+            base = EXCEL_EPOCH + dt.timedelta(days=int(val))
+            return f"{base.month}/{base.day}/{base.year}"
+        except Exception:
+            pass
+
+    # 4) parse genérico para otros strings
+    if isinstance(val, str):
+        try:
+            ts = pd.to_datetime(val, errors="raise", dayfirst=False, infer_datetime_format=True)
+            ts = ts.to_pydatetime()
+            return f"{ts.month}/{ts.day}/{ts.year}"
+        except Exception:
+            pass
+
+    return None
 
 @st.cache_data(show_spinner=False)
 def _detect_separator(sample: str) -> str:
@@ -202,6 +199,56 @@ def _validate(df: pd.DataFrame) -> List[str]:
         issues.append("Precios con formato inválido.")
     return issues
 
+# =====================
+# Diagnóstico rápido de credenciales + prueba
+# =====================
+with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
+    url_probe = _get_secret("SUPABASE_URL")
+    key_probe = _get_secret("SUPABASE_KEY")
+    table_probe = os.getenv("SUPABASE_TABLE", st.secrets.get("SUPABASE_TABLE", "quotations")) if hasattr(st, "secrets") else os.getenv("SUPABASE_TABLE", "quotations")
+
+    st.write("URL presente:", bool(url_probe))
+    st.write("KEY presente:", bool(key_probe))
+    st.write("Tabla destino:", table_probe)
+
+    def _test_insert_row():
+        if not url_probe or not key_probe:
+            return False, "Faltan SUPABASE_URL o SUPABASE_KEY (en st.secrets o variables de entorno)."
+        if create_client is None:
+            return False, "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
+        client = create_client(url_probe, key_probe)
+        now = pd.Timestamp.utcnow().tz_localize(None).date()
+        payload = [{
+            "cotization_date": _cot_date_to_mdy_text(now),  # <-- M/D/YYYY texto
+            "organic": 0,
+            "product": "_probe_streamlit_",
+            "price": 0.01,
+            "location": "diagnostic",
+            "concat": f"diag-{int(pd.Timestamp.utcnow().timestamp())}",
+            "volume_num": None,
+            "volume_unit": None,
+            "volume_standard": None,
+            "vendorclean": "_probe_vendor_",
+            "source_chat_id": "streamlit",
+            "source_message_id": str(int(pd.Timestamp.utcnow().timestamp()))
+        }]
+        try:
+            client.table(table_probe).upsert(
+                payload,
+                on_conflict=(
+                    "cotization_date,organic,product,price,location,concat,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "source_chat_id,source_message_id"
+                )
+            ).execute()
+            return True, f"Inserción/Upsert OK en '{table_probe}'."
+        except Exception as e:
+            return False, f"Error al upsert: {e}"
+
+    if st.button("Probar conexión e insertar fila de diagnóstico", key="probe_btn"):
+        ok, msg = _test_insert_row()
+        (st.success if ok else st.error)(msg)
+
 # ------------------------
 # UI — Pegar y parsear
 # ------------------------
@@ -233,24 +280,7 @@ if pasted:
     st.subheader("4) Subir estas filas ahora → tabla `quotations`")
     st.caption("Usa anon key con RLS. Se hace upsert usando TODAS las columnas de negocio como clave de conflicto.")
 
-    def _get_secret(name: str):
-        try:
-            return st.secrets[name]
-        except Exception:
-            return os.getenv(name)
-
     # ===== Helpers específicos para 'quotations' =====
-    def _to_mmddyy_text(d):
-        if pd.isna(d):
-            return None
-        try:
-            ts = pd.to_datetime(d, errors="coerce")
-        except Exception:
-            return None
-        if pd.isna(ts):
-            return None
-        return ts.strftime("%m%d%y")
-
     def _parse_volume_fields(vol_raw: pd.Series):
         s = vol_raw.astype(str).str.strip()
         num = s.str.extract(r"([0-9]+(?:\.[0-9]+)?)", expand=False).astype(float)
@@ -262,7 +292,8 @@ if pasted:
 
     def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
         out = pd.DataFrame()
-        out["cotization_date"] = df_norm["Date"].apply(_to_mmddyy_text)
+        # >>> usa el normalizador robusto a M/D/YYYY (texto)
+        out["cotization_date"] = df_norm["Date"].apply(_cot_date_to_mdy_text)
         ogcv = df_norm["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
         out["organic"] = (ogcv == "OG").astype(int)
         out["product"] = df_norm["Product"]
@@ -299,8 +330,8 @@ if pasted:
             client.table(table_name).upsert(
                 records,
                 on_conflict=(
-                    "cotization_date,organic,product,price,location,concat,"\
-                    "volume_num,volume_unit,volume_standard,vendorclean,"\
+                    "cotization_date,organic,product,price,location,concat,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
                     "source_chat_id,source_message_id"
                 )
             ).execute()
