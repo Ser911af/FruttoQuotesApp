@@ -5,6 +5,7 @@ import datetime as dt
 from typing import Dict, List
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 
 try:
@@ -285,7 +286,9 @@ if pasted:
             return "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
         client = create_client(url, key)
         df_q = _normalize_to_quotations(df_norm)
-        records = df_q.where(pd.notnull(df_q), None).to_dict(orient="records")
+        # Evitar NaN/NaT en JSON -> convertir todo a object y reemplazar por None
+        df_q = df_q.astype(object).where(pd.notnull(df_q), None)
+        records = df_q.to_dict(orient="records")
         try:
             client.table(table_name).upsert(
                 records,
@@ -311,82 +314,6 @@ if pasted:
         with st.spinner("Subiendo a Supabase..."):
             msg = upload_to_supabase_for_quotations(norm_df)
         (st.success if msg.startswith("Subida completa") else st.error)(msg)
-
+    # (Se ha unificado el flujo de subida; este bloque duplicado fue eliminado)
     st.markdown("---")
-    st.subheader("4) Subir estas filas ahora")
-    st.caption("Si prefieres, puedes subir de inmediato. Si hay advertencias de validación, marca la confirmación.")
-
-    def _get_secret(name: str):
-        try:
-            return st.secrets[name]
-        except Exception:
-            return os.getenv(name)
-
-    table_name = os.getenv("SUPABASE_TABLE", "quotes")
-
-    def upload_to_supabase(df: pd.DataFrame) -> str:
-        url = _get_secret("SUPABASE_URL")
-        key = _get_secret("SUPABASE_KEY")
-        if not url or not key:
-            return "Faltan SUPABASE_URL o SUPABASE_KEY (en st.secrets o variables de entorno)."
-        if create_client is None:
-            return "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
-        client = create_client(url, key)
-        records = df.where(pd.notnull(df), None).to_dict(orient="records")
-        try:
-            client.table(table_name).upsert(records, on_conflict="Concat").execute()
-            return f"Subida completa: {len(records)} filas a '{table_name}'."
-        except Exception as e:
-            return f"Error al subir: {e}"
-
-    problems_preview = _validate(norm_df)
-    allow_upload_now = True
-    if problems_preview:
-        with st.expander("Ver advertencias antes de subir"):
-            for p in problems_preview:
-                st.warning(p)
-        allow_upload_now = st.checkbox("Entiendo las advertencias y deseo subir de todos modos", value=False)
-
-    if st.button("⬆️ Subir estas filas ahora", type="primary", disabled=not allow_upload_now):
-        with st.spinner("Subiendo a Supabase..."):
-            msg = upload_to_supabase(norm_df)
-        (st.success if msg.startswith("Subida completa") else st.error)(msg)
-
-    st.markdown("---")
-
-    problems = _validate(norm_df)
-    if problems:
-        for p in problems:
-            st.warning(p)
-        st.stop()
-
-    st.success("Validación OK. Listo para subir.")
-
-    # Subida automática con botón
-    st.subheader("4) Subir a Supabase")
-    table_name = os.getenv("SUPABASE_TABLE", "quotes")
-
-    def upload_to_supabase(df: pd.DataFrame) -> str:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
-        if not url or not key:
-            return "Faltan SUPABASE_URL o SUPABASE_KEY."
-        if create_client is None:
-            return "Paquete 'supabase' no disponible."
-        client = create_client(url, key)
-        records = df.where(pd.notnull(df), None).to_dict(orient="records")
-        try:
-            res = client.table(table_name).upsert(records, on_conflict="Concat").execute()
-            return f"Subida completa: {len(records)} filas a '{table_name}'."
-        except Exception as e:
-            return f"Error al subir: {e}"
-
-    if st.button("⬆️ Subir a Supabase", type="primary"):
-        with st.spinner("Subiendo a Supabase..."):
-            msg = upload_to_supabase(norm_df)
-        if msg.startswith("Subida completa"):
-            st.success(msg)
-        else:
-            st.error(msg)
-else:
-    st.info("Pega tus datos arriba para empezar.")
+    # Fin de la lógica de subida unificada
