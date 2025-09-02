@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as st 
 import pandas as pd
 import os
 import re
@@ -121,28 +121,27 @@ st.title("Daily Sheet")
 colA, colB, colC = st.columns([1, 2, 1])
 with colB:
     if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, use_container_width=True)  # evita warning
+        st.image(LOGO_PATH, use_container_width=True)
     else:
         st.info("Logo no encontrado. Verifica 'data/Asset 7@4x.png'.")
 
 df = fetch_all_quotations_from_supabase()
 
-# Si no hay datos, dejamos la página “suave”
 if df.empty:
     st.info("Sin datos disponibles desde Supabase por ahora.")
     st.caption("Página en construcción — pronto agregamos la vista del día.")
     st.stop()
 
-# Columna fecha normalizada para filtros del día
+# Columna fecha normalizada
 df["_date"] = pd.to_datetime(df["cotization_date"], errors="coerce").dt.date
 valid_dates = df["_date"].dropna()
 if valid_dates.empty:
-    st.warning("No se pudo interpretar ninguna fecha en 'cotization_date'. Revisa el formato fuente.")
+    st.warning("No se pudo interpretar ninguna fecha en 'cotization_date'.")
     st.stop()
 
-# Selector de fecha (default: la más reciente)
+# Selector de fecha en formato mm/dd/yyyy
 default_date = max(valid_dates)
-sel_date = st.date_input("Fecha a mostrar", value=default_date)
+sel_date = st.date_input("Fecha a mostrar", value=default_date, format="MM/DD/YYYY")
 
 # Subset del día
 day_df = df[df["_date"] == sel_date].copy()
@@ -158,6 +157,7 @@ day_df["Size"]    = day_df["Product"].apply(_size_from_product)
 day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
 day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
+day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
 # Filtros de la vista del día
 cols = st.columns(4)
@@ -189,14 +189,14 @@ else:
     day_df = day_df.sort_values(sort_opt)
 
 # Grid final
-show = day_df[["Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
+show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
 st.dataframe(show, use_container_width=True)
 
-# Descarga CSV
+# Descarga CSV con fecha formateada
 csv_bytes = show.to_csv(index=False).encode("utf-8")
 st.download_button(
     "⬇️ Descargar CSV (vista del día)",
     data=csv_bytes,
-    file_name=f"daily_sheet_{sel_date}.csv",
+    file_name=f"daily_sheet_{sel_date.strftime('%m-%d-%Y')}.csv",
     mime="text/csv"
 )
