@@ -85,7 +85,7 @@ def fetch_all_quotations_from_supabase():
         try:
             resp = (
                 sb.table("quotations")
-                  .select("cotization_date,organic,product,price,location,volume_num,volume_unit,volume_standard,vendorclean")
+                  .select("id,cotization_date,organic,product,price,location,volume_num,volume_unit,volume_standard,vendorclean")
                   .range(start, end)
                   .execute()
             )
@@ -159,21 +159,30 @@ day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
-# Filtros de la vista del día
+# ---------- Filtros de la vista del día ----------
 cols = st.columns(4)
+
+# 1) Productos disponibles (reemplaza "Familias")
 with cols[0]:
-    fams = ["Tomato", "Soft Squash", "Cucumbers", "Bell Peppers", "Others"]
-    sel_fams = st.multiselect("Familias", options=fams, default=fams)
+    product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_products = st.multiselect("Productos (disponibles)", options=product_options, default=product_options)
+
+# 2) Ubicaciones
 with cols[1]:
-    locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if x != ""])
+    locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_locs = st.multiselect("Ubicaciones", options=locs, default=locs)
+
+# 3) Búsqueda por texto en Product
 with cols[2]:
     search = st.text_input("Buscar producto (contiene)", "")
+
+# 4) Orden
 with cols[3]:
     sort_opt = st.selectbox("Ordenar por", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
 
-# Aplicar filtros
-day_df = day_df[day_df["Family"].isin(sel_fams)]
+# ---- Aplicar filtros ----
+if sel_products:
+    day_df = day_df[day_df["Product"].isin(sel_products)]
 if sel_locs:
     day_df = day_df[day_df["Where"].isin(sel_locs)]
 if search.strip():
@@ -188,7 +197,87 @@ elif sort_opt == "Price (desc)":
 else:
     day_df = day_df.sort_values(sort_opt)
 
-# Grid final
+# ---------- Modo edición de precios ----------
+st.divider()
+edit_mode = st.toggle("✏️ Modo edición de precios", value=False, help="Habilita edición inline SOLO de la columna Price.")
+
+if edit_mode:
+    # Editor con columnas reales; SOLO price es editable
+    editable_cols = ["price"]
+
+    edit_df = day_df[["id", "cotization_date", "VendorClean", "Location", "Product", "Price"]].copy()
+    edit_df = edit_df.rename(columns={
+        "VendorClean": "Shipper",
+        "Location": "Where",
+        "Price": "price"  # editor trabaja con 'price' numérica
+    })
+
+    col_config = {
+        "id": st.column_config.TextColumn("ID", help="Clave del registro", disabled=True),
+        "cotization_date": st.column_config.DatetimeColumn("Date", format="MM/DD/YYYY", disabled=True),
+        "Shipper": st.column_config.TextColumn("Shipper", disabled=True),
+        "Where": st.column_config.TextColumn("Where", disabled=True),
+        "Product": st.column_config.TextColumn("Product", disabled=True),
+        "price": st.column_config.NumberColumn("Price (numérico)", min_value=0.0, step=0.01, help="Ingresa solo números (sin $)"),
+    }
+
+    st.caption("Edita el **Price** y luego presiona **Guardar cambios**.")
+    edited_df = st.data_editor(
+        edit_df,
+        key="editor_prices",
+        num_rows="fixed",
+        use_container_width=True,
+        column_config=col_config,
+        column_order=["id", "cotization_date", "Shipper", "Where", "Product", "price"]
+    )
+
+    if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
+        # Detectar cambios en 'price' por fila
+        orig = edit_df.set_index("id")[editable_cols]
+        new  = edited_df.set_index("id")[editable_cols]
+
+        changed_mask = (orig != new) & ~(orig.isna() & new.isna())
+        dirty_ids = new.index[changed_mask.any(axis=1)].tolist()
+
+        if not dirty_ids:
+            st.success("No hay cambios por guardar.")
+        else:
+            payload = []
+            for _id in dirty_ids:
+                new_price = new.loc[_id, "price"]
+                try:
+                    new_price = float(new_price)
+                except Exception:
+                    continue
+                payload.append({"id": _id, "price": new_price})
+
+            if not payload:
+                st.info("No se detectaron precios válidos para actualizar.")
+            else:
+                try:
+                    from supabase import create_client
+                    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+                    SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
+                    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+                    # update por id (fila a fila)
+                    for item in payload:
+                        _id = item["id"]
+                        sb.table("quotations").update({"price": item["price"]}).eq("id", _id).execute()
+
+                    st.success(f"Se actualizaron {len(payload)} precio(s). 🎉")
+                    st.balloons()
+
+                    # Refrescar en memoria para que la vista muestre el nuevo Price$
+                    id_to_price = {p["id"]: p["price"] for p in payload}
+                    mask = day_df["id"].isin(id_to_price.keys())
+                    day_df.loc[mask, "Price"] = day_df.loc[mask, "id"].map(id_to_price)
+                    day_df["Price$"] = day_df["Price"].apply(_format_price)
+
+                except Exception as e:
+                    st.error(f"Error al guardar cambios: {e}")
+
+# ---------- Vista de la tabla (solo lectura bonita) ----------
 show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
 st.dataframe(show, use_container_width=True)
 
