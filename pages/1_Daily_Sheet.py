@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Versión visible para confirmar despliegue ----
-VERSION = "Daily_Sheet v2025-09-03 - visualiza TABLA VISIBLE"
+VERSION = "Daily_Sheet v2025-09-03 - tabla visible + edición mapeada"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -233,15 +233,18 @@ edit_mode = st.toggle(
 )
 
 if edit_mode:
-    # TODAS las columnas reales excepto fecha
-    editable_cols = ["VendorClean", "Location", "Product", "organic", "Price", "volume_num", "volume_unit"]
+    # Nombres EXACTOS de columnas en BD (minúsculas)
+    # (Las columnas reales en PostgREST: vendorclean, location, product, organic, price, volume_num, volume_unit)
+    edit_df = day_df[[
+        "id", "cotization_date", "VendorClean", "Location", "Product", "Organic", "Price", "volume_num", "volume_unit"
+    ]].copy()
 
-    edit_df = day_df[["id", "cotization_date"] + editable_cols].copy()
-    # Renombrar para que el editor sea legible (y luego revertimos antes de guardar)
+    # Renombramos a alias legibles para la UI; dejamos 'organic' y 'price' ya con los nombres target de BD
     edit_df = edit_df.rename(columns={
         "VendorClean": "Shipper",
         "Location": "Where",
-        "Price": "price"  # editor trabaja con numérico simple
+        "Organic": "organic",
+        "Price": "price"
     })
 
     col_config = {
@@ -267,41 +270,50 @@ if edit_mode:
     )
 
     if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
-        orig = edit_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
-        new  = edited_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
+        # 1) Detectar diferencias (usando alias de UI)
+        ORIG = edit_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
+        NEW  = edited_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
 
-        changed_mask = (orig != new) & ~(orig.isna() & new.isna())
-        dirty_ids = new.index[changed_mask.any(axis=1)].tolist()
+        changed_mask = (ORIG != NEW) & ~(ORIG.isna() & NEW.isna())
+        dirty_ids = NEW.index[changed_mask.any(axis=1)].tolist()
 
         if not dirty_ids:
             st.success("No hay cambios por guardar.")
         else:
+            # 2) Construir payload con nombres EXACTOS de BD (minúsculas)
             payload = []
             for _id in dirty_ids:
-                row = new.loc[_id].to_dict()
+                ui_row = NEW.loc[_id].to_dict()
 
-                # Conversión mínima segura
+                # Normalizar tipos
                 for k in ["price", "volume_num"]:
+                    v = ui_row.get(k)
                     try:
-                        if row.get(k) not in (None, ""):
-                            row[k] = float(row[k])
+                        ui_row[k] = float(v) if v not in (None, "") else None
                     except Exception:
                         pass
+                v = ui_row.get("organic")
                 try:
-                    if row.get("organic") not in (None, ""):
-                        row["organic"] = int(row["organic"])
+                    ui_row["organic"] = int(v) if v not in (None, "") else None
                 except Exception:
                     pass
 
-                # Revertir nombres a columnas reales de la tabla
-                row["VendorClean"] = row.pop("Shipper", None)
-                row["Location"]    = row.pop("Where", None)
-                row["Price"]       = row.pop("price", None)
+                # Mapeo UI -> BD
+                db_row = {
+                    "vendorclean": ui_row.get("Shipper"),
+                    "location": ui_row.get("Where"),
+                    "product": ui_row.get("Product"),
+                    "organic": ui_row.get("organic"),
+                    "price": ui_row.get("price"),
+                    "volume_num": ui_row.get("volume_num"),
+                    "volume_unit": ui_row.get("volume_unit"),
+                }
+                clean_db_row = {k: v for k, v in db_row.items() if v is not None}
+                if not clean_db_row:
+                    continue
+                payload.append({"id": _id, **clean_db_row})
 
-                # Quitar Nones para no sobreescribir con nulls
-                clean = {k: v for k, v in row.items() if v is not None}
-                payload.append({"id": _id, **clean})
-
+            # 3) Ejecutar updates por id (BD usa minúsculas)
             try:
                 from supabase import create_client
                 SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -315,14 +327,15 @@ if edit_mode:
                 st.success(f"Se actualizaron {len(payload)} registro(s). 🎉")
                 st.balloons()
 
-                # Refrescar en memoria
-                upd = new.loc[dirty_ids].reset_index()
+                # 4) Refrescar en memoria day_df (volviendo de alias UI a nombres de day_df)
+                upd = NEW.loc[dirty_ids].reset_index()
                 upd = upd.rename(columns={"Shipper":"VendorClean","Where":"Location","price":"Price"})
                 for _, r in upd.iterrows():
-                    row_mask = day_df["id"] == r["id"]
+                    mask = day_df["id"] == r["id"]
                     for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit"]:
                         if col in r and pd.notna(r[col]):
-                            day_df.loc[row_mask, col] = r[col]
+                            day_df.loc[mask, col] = r[col]
+                # Derivadas:
                 day_df["Shipper"] = day_df["VendorClean"]
                 day_df["Where"]   = day_df["Location"]
                 day_df["Price$"]  = day_df["Price"].apply(_format_price)
@@ -377,6 +390,7 @@ else:
             st.metric("Ofertas visibles", f"{len(viz_day)}")
 
         # ---- 1) Precio promedio por ubicación (barras) ----
+        from itertools import chain
         g_loc = (viz_day.groupby("Where_norm", as_index=False)
                         .agg(avg_price=("price_num","mean"),
                              offers=("Where_norm","count")))
