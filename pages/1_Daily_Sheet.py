@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+import altair as alt
 
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
@@ -197,44 +198,51 @@ elif sort_opt == "Price (desc)":
 else:
     day_df = day_df.sort_values(sort_opt)
 
-# ---------- Modo edición de precios ----------
+# ---------- Modo edición (todas las variables excepto la fecha) ----------
 st.divider()
-edit_mode = st.toggle("✏️ Modo edición de precios", value=False, help="Habilita edición inline SOLO de la columna Price.")
+edit_mode = st.toggle(
+    "✏️ Modo edición (todo excepto fecha)",
+    value=False,
+    help="Edita Shipper, Where, Product, OG/CV, Price, Volume Qty/Unit. La fecha permanece bloqueada."
+)
 
 if edit_mode:
-    # Editor con columnas reales; SOLO price es editable
-    editable_cols = ["price"]
+    # TODAS las columnas reales excepto fecha
+    editable_cols = ["VendorClean", "Location", "Product", "organic", "Price", "volume_num", "volume_unit"]
 
-    edit_df = day_df[["id", "cotization_date", "VendorClean", "Location", "Product", "Price"]].copy()
+    edit_df = day_df[["id", "cotization_date"] + editable_cols].copy()
+    # Renombrar para que el editor sea legible (y luego revertimos antes de guardar)
     edit_df = edit_df.rename(columns={
         "VendorClean": "Shipper",
         "Location": "Where",
-        "Price": "price"  # editor trabaja con 'price' numérica
+        "Price": "price"  # editor trabaja con numérico simple
     })
 
     col_config = {
-        "id": st.column_config.TextColumn("ID", help="Clave del registro", disabled=True),
+        "id": st.column_config.TextColumn("ID", disabled=True),
         "cotization_date": st.column_config.DatetimeColumn("Date", format="MM/DD/YYYY", disabled=True),
-        "Shipper": st.column_config.TextColumn("Shipper", disabled=True),
-        "Where": st.column_config.TextColumn("Where", disabled=True),
-        "Product": st.column_config.TextColumn("Product", disabled=True),
-        "price": st.column_config.NumberColumn("Price (numérico)", min_value=0.0, step=0.01, help="Ingresa solo números (sin $)"),
+        "Shipper": st.column_config.TextColumn("Shipper"),
+        "Where": st.column_config.TextColumn("Where"),
+        "Product": st.column_config.TextColumn("Product"),
+        "organic": st.column_config.NumberColumn("OG/CV (1=OG,0=CV)", min_value=0, max_value=1, step=1),
+        "price": st.column_config.NumberColumn("Price", min_value=0.0, step=0.01),
+        "volume_num": st.column_config.NumberColumn("Volume Qty", min_value=0.0, step=0.01),
+        "volume_unit": st.column_config.TextColumn("Volume Unit"),
     }
 
-    st.caption("Edita el **Price** y luego presiona **Guardar cambios**.")
+    st.caption("Edita los campos y presiona **Guardar cambios**.")
     edited_df = st.data_editor(
         edit_df,
-        key="editor_prices",
+        key="editor_all",
         num_rows="fixed",
         use_container_width=True,
         column_config=col_config,
-        column_order=["id", "cotization_date", "Shipper", "Where", "Product", "price"]
+        column_order=["id","cotization_date","Shipper","Where","Product","organic","price","volume_num","volume_unit"]
     )
 
     if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
-        # Detectar cambios en 'price' por fila
-        orig = edit_df.set_index("id")[editable_cols]
-        new  = edited_df.set_index("id")[editable_cols]
+        orig = edit_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
+        new  = edited_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
 
         changed_mask = (orig != new) & ~(orig.isna() & new.isna())
         dirty_ids = new.index[changed_mask.any(axis=1)].tolist()
@@ -244,38 +252,59 @@ if edit_mode:
         else:
             payload = []
             for _id in dirty_ids:
-                new_price = new.loc[_id, "price"]
+                row = new.loc[_id].to_dict()
+
+                # Conversión mínima segura
+                for k in ["price", "volume_num"]:
+                    try:
+                        if row.get(k) not in (None, ""):
+                            row[k] = float(row[k])
+                    except Exception:
+                        pass
                 try:
-                    new_price = float(new_price)
+                    if row.get("organic") not in (None, ""):
+                        row["organic"] = int(row["organic"])
                 except Exception:
-                    continue
-                payload.append({"id": _id, "price": new_price})
+                    pass
 
-            if not payload:
-                st.info("No se detectaron precios válidos para actualizar.")
-            else:
-                try:
-                    from supabase import create_client
-                    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-                    SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
-                    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+                # Revertir nombres a columnas reales de la tabla
+                row["VendorClean"] = row.pop("Shipper", None)
+                row["Location"]    = row.pop("Where", None)
+                row["Price"]       = row.pop("price", None)
 
-                    # update por id (fila a fila)
-                    for item in payload:
-                        _id = item["id"]
-                        sb.table("quotations").update({"price": item["price"]}).eq("id", _id).execute()
+                # Quitar Nones para no sobreescribir con nulls
+                clean = {k: v for k, v in row.items() if v is not None}
+                payload.append({"id": _id, **clean})
 
-                    st.success(f"Se actualizaron {len(payload)} precio(s). 🎉")
-                    st.balloons()
+            try:
+                from supabase import create_client
+                SUPABASE_URL = st.secrets["SUPABASE_URL"]
+                SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
+                sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-                    # Refrescar en memoria para que la vista muestre el nuevo Price$
-                    id_to_price = {p["id"]: p["price"] for p in payload}
-                    mask = day_df["id"].isin(id_to_price.keys())
-                    day_df.loc[mask, "Price"] = day_df.loc[mask, "id"].map(id_to_price)
-                    day_df["Price$"] = day_df["Price"].apply(_format_price)
+                for item in payload:
+                    _id = item.pop("id")
+                    sb.table("quotations").update(item).eq("id", _id).execute()
 
-                except Exception as e:
-                    st.error(f"Error al guardar cambios: {e}")
+                st.success(f"Se actualizaron {len(payload)} registro(s). 🎉")
+                st.balloons()
+
+                # Opción 1: refrescar en memoria las columnas clave (rápido)
+                upd = new.loc[dirty_ids].reset_index()
+                upd = upd.rename(columns={"Shipper":"VendorClean","Where":"Location","price":"Price"})
+                for _, r in upd.iterrows():
+                    row_mask = day_df["id"] == r["id"]
+                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit"]:
+                        if col in r and pd.notna(r[col]):
+                            day_df.loc[row_mask, col] = r[col]
+                day_df["Shipper"] = day_df["VendorClean"]
+                day_df["Where"]   = day_df["Location"]
+                day_df["Price$"]  = day_df["Price"].apply(_format_price)
+                # Opción 2: forzar recarga limpia
+                # st.rerun()
+
+            except Exception as e:
+                st.error(f"Error al guardar cambios: {e}")
 
 # ---------- Vista de la tabla (solo lectura bonita) ----------
 show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
@@ -289,3 +318,115 @@ st.download_button(
     file_name=f"daily_sheet_{sel_date.strftime('%m-%d-%Y')}.csv",
     mime="text/csv"
 )
+
+# =========================
+# Visualizaciones (filtros independientes)
+# =========================
+st.markdown("## 📊 Visualizaciones")
+
+# Base para visualizaciones: TODO el histórico (no solo el día)
+viz_df = df.copy()
+
+# Normalizaciones necesarias
+viz_df["date_only"] = pd.to_datetime(viz_df["cotization_date"], errors="coerce").dt.date
+viz_df["price_num"] = pd.to_numeric(viz_df["Price"], errors="coerce")
+viz_df["volume_num"] = pd.to_numeric(viz_df["volume_num"], errors="coerce")
+
+# -------- Filtros independientes --------
+c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1.2])
+
+with c1:
+    prod_opts = sorted([x for x in viz_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_prod = st.selectbox("Producto", options=["(selecciona uno)"] + prod_opts, index=0)
+
+with c2:
+    # Rango de fechas
+    min_d, max_d = viz_df["date_only"].min(), viz_df["date_only"].max()
+    start_d, end_d = st.date_input(
+        "Rango de fechas",
+        value=(min_d or default_date, max_d or default_date),
+        format="MM/DD/YYYY"
+    )
+
+with c3:
+    loc_opts = sorted([x for x in viz_df["Location"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_locs_v = st.multiselect("Ubicaciones (viz)", options=loc_opts, default=loc_opts)
+
+with c4:
+    ship_opts = sorted([x for x in viz_df["VendorClean"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_ships_v = st.multiselect("Shippers (viz)", options=ship_opts, default=ship_opts)
+
+# Aplicar filtros
+fdf = viz_df.copy()
+if sel_prod != "(selecciona uno)":
+    fdf = fdf[fdf["Product"] == sel_prod]
+if sel_locs_v:
+    fdf = fdf[fdf["Location"].isin(sel_locs_v)]
+if sel_ships_v:
+    fdf = fdf[fdf["VendorClean"].isin(sel_ships_v)]
+if isinstance(start_d, tuple):  # por si el widget devuelve 2 fechas en una tupla
+    start_d, end_d = start_d
+fdf = fdf[(fdf["date_only"] >= start_d) & (fdf["date_only"] <= end_d)]
+
+if sel_prod == "(selecciona uno)":
+    st.info("Selecciona un **Producto** para habilitar las visualizaciones.")
+else:
+    if fdf.empty:
+        st.warning("Sin datos para los filtros seleccionados.")
+    else:
+        # -------- 1) Precio promedio diario por ubicación (línea) --------
+        g1 = (fdf
+              .groupby(["date_only","Location"], as_index=False)
+              .agg(avg_price=("price_num","mean")))
+
+        chart1 = alt.Chart(g1).mark_line(point=True).encode(
+            x=alt.X("date_only:T", title="Fecha"),
+            y=alt.Y("avg_price:Q", title="Precio promedio"),
+            color=alt.Color("Location:N", title="Ubicación"),
+            tooltip=[alt.Tooltip("date_only:T","Fecha"), "Location:N", alt.Tooltip("avg_price:Q", format=".2f")]
+        ).properties(title=f"Precio promedio diario — {sel_prod}", height=300)
+
+        st.altair_chart(chart1, use_container_width=True)
+
+        # -------- 2) Distribución de precios por ubicación (caja o barras) --------
+        if fdf["Location"].nunique() > 1 and len(fdf) >= 10:
+            chart2 = alt.Chart(fdf).mark_boxplot().encode(
+                x=alt.X("Location:N", title="Ubicación"),
+                y=alt.Y("price_num:Q", title="Precio"),
+                color=alt.Color("Location:N", legend=None)
+            ).properties(title="Distribución de precios por ubicación", height=320)
+        else:
+            g2 = fdf.groupby("Location", as_index=False).agg(avg_price=("price_num","mean"))
+            chart2 = alt.Chart(g2).mark_bar().encode(
+                x=alt.X("Location:N", title="Ubicación"),
+                y=alt.Y("avg_price:Q", title="Precio promedio"),
+                tooltip=["Location:N", alt.Tooltip("avg_price:Q", format=".2f")]
+            ).properties(title="Precio promedio por ubicación", height=320)
+
+        st.altair_chart(chart2, use_container_width=True)
+
+        # -------- 3) Participación por shipper (volumen) --------
+        g3 = (fdf.groupby("VendorClean", as_index=False)
+                 .agg(total_volume=("volume_num","sum"))
+                 .sort_values("total_volume", ascending=False)
+                 .head(15))
+
+        chart3 = alt.Chart(g3).mark_bar().encode(
+            y=alt.Y("VendorClean:N", sort="-x", title="Shipper"),
+            x=alt.X("total_volume:Q", title="Volumen total"),
+            tooltip=["VendorClean:N", alt.Tooltip("total_volume:Q", format=",.0f")]
+        ).properties(title="Top shippers por volumen (máx. 15)", height=350)
+
+        st.altair_chart(chart3, use_container_width=True)
+
+        # -------- 4) Volumen histórico del producto (línea) --------
+        g4 = (fdf.groupby("date_only", as_index=False)
+                 .agg(total_volume=("volume_num","sum")))
+
+        chart4 = alt.Chart(g4).mark_line(point=True).encode(
+            x=alt.X("date_only:T", title="Fecha"),
+            y=alt.Y("total_volume:Q", title="Volumen total"),
+            tooltip=[alt.Tooltip("date_only:T","Fecha"), alt.Tooltip("total_volume:Q", format=",.0f")]
+        ).properties(title="Volumen total por día", height=300)
+
+        st.altair_chart(chart4, use_container_width=True)
