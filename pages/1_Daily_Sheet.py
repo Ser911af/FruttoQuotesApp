@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Versión visible para confirmar despliegue ----
-VERSION = "Daily_Sheet v2025-09-03 - visuals ON"
+VERSION = "Daily_Sheet v2025-09-03 - visualiza TABLA VISIBLE"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -68,6 +68,13 @@ def _family_from_product(p: str) -> str:
     if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano"]):
         return "Bell Peppers"
     return "Others"
+
+def _norm_name(x: str) -> str:
+    """Normaliza nombres para agrupar (p.ej. 'global mex' vs 'Global Mex')."""
+    if not isinstance(x, str):
+        return ""
+    s = x.strip()
+    return s[:1].upper() + s[1:].lower() if s else s
 
 # ------------------------
 # Data fetch (Supabase)
@@ -182,7 +189,7 @@ day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").d
 # ---------- Filtros de la vista del día ----------
 cols = st.columns(4)
 
-# 1) Productos disponibles (reemplaza "Familias")
+# 1) Productos disponibles
 with cols[0]:
     product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_products = st.multiselect("Productos (disponibles)", options=product_options, default=product_options)
@@ -337,132 +344,105 @@ st.download_button(
 )
 
 # =========================
-# Visualizaciones (filtros independientes)
+# 📊 Visualizaciones (BASADAS en la tabla visible)
 # =========================
-st.markdown("## 📊 Visualizaciones")
-st.info("Marcador: entramos a la sección de visualizaciones.")
+st.markdown("## 📊 Visualizaciones (tabla actual)")
 
 if not ALTAIR_OK:
     st.warning("Altair no está instalado. Agrega `altair>=5` a requirements.txt y reinicia la app.")
 else:
-    # Base para visualizaciones: TODO el histórico (no solo el día)
-    viz_df = df.copy()
+    viz_day = day_df.copy()
 
-    # Normalizaciones necesarias
-    viz_df["date_only"] = pd.to_datetime(viz_df["cotization_date"], errors="coerce").dt.date
-    viz_df["price_num"] = pd.to_numeric(viz_df["Price"], errors="coerce")
-    viz_df["volume_num"] = pd.to_numeric(viz_df["volume_num"], errors="coerce")
-
-    # -------- Filtros independientes --------
-    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1.2])
-
-    with c1:
-        prod_opts = sorted([x for x in viz_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
-        sel_prod = st.selectbox("Producto", options=["(selecciona uno)"] + prod_opts, index=0)
-
-    with c2:
-        # Rango de fechas
-        min_d, max_d = viz_df["date_only"].min(), viz_df["date_only"].max()
-        start_d, end_d = st.date_input(
-            "Rango de fechas",
-            value=(min_d or default_date, max_d or default_date),
-            format="MM/DD/YYYY"
-        )
-
-    with c3:
-        loc_opts = sorted([x for x in viz_df["Location"].dropna().unique().tolist() if str(x).strip() != ""])
-        sel_locs_v = st.multiselect("Ubicaciones (viz)", options=loc_opts, default=loc_opts)
-
-    with c4:
-        ship_opts = sorted([x for x in viz_df["VendorClean"].dropna().unique().tolist() if str(x).strip() != ""])
-        sel_ships_v = st.multiselect("Shippers (viz)", options=ship_opts, default=ship_opts)
-
-    # Aplicar filtros
-    fdf = viz_df.copy()
-    if sel_prod != "(selecciona uno)":
-        fdf = fdf[fdf["Product"] == sel_prod]
-    if sel_locs_v:
-        fdf = fdf[fdf["Location"].isin(sel_locs_v)]
-    if sel_ships_v:
-        fdf = fdf[fdf["VendorClean"].isin(sel_ships_v)]
-    if isinstance(start_d, tuple):  # por si el widget devuelve 2 fechas en una tupla
-        start_d, end_d = start_d
-    fdf = fdf[(fdf["date_only"] >= start_d) & (fdf["date_only"] <= end_d)]
-
-    # ---- Smoke test para confirmar render ----
-    st.markdown("#### 🔍 Test de render")
-    st.write(f"Filas totales en df para viz: {len(viz_df)} | Filas tras filtros: {len(fdf)}")
-    if len(viz_df) > 0:
-        test_df = viz_df.head(50).copy()
-        chart_test = alt.Chart(test_df).mark_point().encode(
-            x=alt.X("date_only:T", title="Fecha"),
-            y=alt.Y("price_num:Q", title="Precio"),
-            tooltip=["Product","Location","VendorClean","price_num"]
-        ).properties(title="(Test) puntos precio vs fecha", height=200)
-        st.altair_chart(chart_test, use_container_width=True)
+    if viz_day.empty:
+        st.info("No hay datos en la tabla actual para graficar.")
     else:
-        st.write("Sin datos para test.")
+        # Normalizaciones para graficar
+        viz_day["price_num"] = pd.to_numeric(viz_day["Price"], errors="coerce")
+        viz_day["volume_num"] = pd.to_numeric(viz_day["volume_num"], errors="coerce")
+        viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
+        viz_day["Shipper_norm"] = viz_day["Shipper"].apply(_norm_name)
 
-    # ---- Graficas solo si hay producto elegido ----
-    if sel_prod == "(selecciona uno)":
-        st.info("Selecciona un **Producto** para habilitar las visualizaciones.")
-    else:
-        if fdf.empty:
-            st.warning("Sin datos para los filtros seleccionados.")
-        else:
-            # -------- 1) Precio promedio diario por ubicación (línea) --------
-            g1 = (fdf
-                  .groupby(["date_only","Location"], as_index=False)
-                  .agg(avg_price=("price_num","mean")))
+        # ---- KPIs rápidos (de lo visible) ----
+        c_k1, c_k2, c_k3, c_k4 = st.columns(4)
+        with c_k1:
+            mean_price = viz_day["price_num"].mean()
+            st.metric("Precio promedio (tabla)", f"{mean_price:.2f}" if pd.notna(mean_price) else "—")
+        with c_k2:
+            min_price = viz_day["price_num"].min()
+            st.metric("Precio mínimo (tabla)", f"{min_price:.2f}" if pd.notna(min_price) else "—")
+        with c_k3:
+            max_price = viz_day["price_num"].max()
+            st.metric("Precio máximo (tabla)", f"{max_price:.2f}" if pd.notna(max_price) else "—")
+        with c_k4:
+            st.metric("Ofertas visibles", f"{len(viz_day)}")
 
-            chart1 = alt.Chart(g1).mark_line(point=True).encode(
-                x=alt.X("date_only:T", title="Fecha"),
-                y=alt.Y("avg_price:Q", title="Precio promedio"),
-                color=alt.Color("Location:N", title="Ubicación"),
-                tooltip=[alt.Tooltip("date_only:T","Fecha"), "Location:N", alt.Tooltip("avg_price:Q", format=".2f")]
-            ).properties(title=f"Precio promedio diario — {sel_prod}", height=300)
+        # ---- 1) Precio promedio por ubicación (barras) ----
+        g_loc = (viz_day.groupby("Where_norm", as_index=False)
+                        .agg(avg_price=("price_num","mean"),
+                             offers=("Where_norm","count")))
+        if not g_loc.empty:
+            chart_loc = alt.Chart(g_loc).mark_bar().encode(
+                x=alt.X("avg_price:Q", title="Precio promedio"),
+                y=alt.Y("Where_norm:N", sort="-x", title="Ubicación"),
+                tooltip=["Where_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Precio promedio por ubicación (según tabla)", height=320)
+            st.altair_chart(chart_loc, use_container_width=True)
 
-            st.altair_chart(chart1, use_container_width=True)
+        # ---- 2) Precio promedio por shipper (barras) ----
+        g_ship = (viz_day.groupby("Shipper_norm", as_index=False)
+                         .agg(avg_price=("price_num","mean"),
+                              offers=("Shipper_norm","count")))
+        if not g_ship.empty:
+            chart_ship = alt.Chart(g_ship).mark_bar().encode(
+                x=alt.X("avg_price:Q", title="Precio promedio"),
+                y=alt.Y("Shipper_norm:N", sort="-x", title="Shipper"),
+                tooltip=["Shipper_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Precio promedio por shipper (según tabla)", height=350)
+            st.altair_chart(chart_ship, use_container_width=True)
 
-            # -------- 2) Distribución de precios por ubicación (caja o barras) --------
-            if fdf["Location"].nunique() > 1 and len(fdf) >= 10:
-                chart2 = alt.Chart(fdf).mark_boxplot().encode(
-                    x=alt.X("Location:N", title="Ubicación"),
-                    y=alt.Y("price_num:Q", title="Precio"),
-                    color=alt.Color("Location:N", legend=None)
-                ).properties(title="Distribución de precios por ubicación", height=320)
-            else:
-                g2 = fdf.groupby("Location", as_index=False).agg(avg_price=("price_num","mean"))
-                chart2 = alt.Chart(g2).mark_bar().encode(
-                    x=alt.X("Location:N", title="Ubicación"),
-                    y=alt.Y("avg_price:Q", title="Precio promedio"),
-                    tooltip=["Location:N", alt.Tooltip("avg_price:Q", format=".2f")]
-                ).properties(title="Precio promedio por ubicación", height=320)
-
-            st.altair_chart(chart2, use_container_width=True)
-
-            # -------- 3) Participación por shipper (volumen) --------
-            g3 = (fdf.groupby("VendorClean", as_index=False)
-                     .agg(total_volume=("volume_num","sum"))
-                     .sort_values("total_volume", ascending=False)
-                     .head(15))
-
-            chart3 = alt.Chart(g3).mark_bar().encode(
-                y=alt.Y("VendorClean:N", sort="-x", title="Shipper"),
+        # ---- 3) Volumen por shipper (barras) ----
+        g_vol = (viz_day.groupby("Shipper_norm", as_index=False)
+                        .agg(total_volume=("volume_num","sum")))
+        g_vol = g_vol[g_vol["total_volume"].fillna(0) > 0]
+        if not g_vol.empty:
+            chart_vol = alt.Chart(g_vol).mark_bar().encode(
                 x=alt.X("total_volume:Q", title="Volumen total"),
-                tooltip=["VendorClean:N", alt.Tooltip("total_volume:Q", format=",.0f")]
-            ).properties(title="Top shippers por volumen (máx. 15)", height=350)
+                y=alt.Y("Shipper_norm:N", sort="-x", title="Shipper"),
+                tooltip=["Shipper_norm:N", alt.Tooltip("total_volume:Q", format=",.0f")]
+            ).properties(title="Volumen por shipper (según tabla)", height=350)
+            st.altair_chart(chart_vol, use_container_width=True)
 
-            st.altair_chart(chart3, use_container_width=True)
+        # ---- 4) Precio promedio por producto (barras) ----
+        g_prod = (viz_day.groupby("Product", as_index=False)
+                          .agg(avg_price=("price_num","mean"),
+                               offers=("Product","count")))
+        if not g_prod.empty and g_prod["Product"].nunique() > 1:
+            chart_prod = alt.Chart(g_prod).mark_bar().encode(
+                x=alt.X("avg_price:Q", title="Precio promedio"),
+                y=alt.Y("Product:N", sort="-x", title="Producto"),
+                tooltip=["Product:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Precio promedio por producto (según tabla)", height=350)
+            st.altair_chart(chart_prod, use_container_width=True)
 
-            # -------- 4) Volumen histórico del producto (línea) --------
-            g4 = (fdf.groupby("date_only", as_index=False)
-                     .agg(total_volume=("volume_num","sum")))
+        # ---- 5) Scatter Precio vs Volumen (para detectar “ofertas gordas”/outliers) ----
+        if viz_day["volume_num"].fillna(0).sum() > 0:
+            scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
+                x=alt.X("price_num:Q", title="Precio"),
+                y=alt.Y("volume_num:Q", title="Volumen"),
+                tooltip=["Product","Shipper_norm","Where_norm",
+                         alt.Tooltip("price_num:Q", format=".2f"),
+                         alt.Tooltip("volume_num:Q", format=",.0f")]
+            ).properties(title="Precio vs Volumen (según tabla)", height=320)
+            st.altair_chart(scatter, use_container_width=True)
 
-            chart4 = alt.Chart(g4).mark_line(point=True).encode(
-                x=alt.X("date_only:T", title="Fecha"),
-                y=alt.Y("total_volume:Q", title="Volumen total"),
-                tooltip=[alt.Tooltip("date_only:T","Fecha"), alt.Tooltip("total_volume:Q", format=",.0f")]
-            ).properties(title="Volumen total por día", height=300)
-
-            st.altair_chart(chart4, use_container_width=True)
+        # ---- 6) Tabla de extremos: Top/Bottom precios visibles ----
+        with st.expander("🔎 Ver extremos de precio (tabla visible)"):
+            tmp = viz_day[["Product","Shipper","Where","price_num","Volume?"]].dropna(subset=["price_num"]).copy()
+            tmp = tmp.sort_values("price_num")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write("**Bottom 5 (más baratos)**")
+                st.dataframe(tmp.head(5).rename(columns={"price_num":"Price"}), use_container_width=True)
+            with c2:
+                st.write("**Top 5 (más caros)**")
+                st.dataframe(tmp.tail(5).rename(columns={"price_num":"Price"}), use_container_width=True)
