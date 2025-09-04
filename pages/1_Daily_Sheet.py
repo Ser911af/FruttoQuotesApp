@@ -1,4 +1,4 @@
-import streamlit as st 
+import streamlit as st
 import pandas as pd
 import os
 import re
@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Versión visible para confirmar despliegue ----
-VERSION = "Daily_Sheet v2025-09-03 - tabla visible + edición mapeada"
+VERSION = "Daily_Sheet v2025-09-04 - edición Size (volume_standard)"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -31,6 +31,13 @@ def _size_from_product(p: str) -> str:
         return ""
     m = _size_regex.search(p)
     return m.group(1) if m else ""
+
+def _choose_size(row) -> str:
+    # Prioriza el size normalizado de BD; si no existe, intenta extraerlo del Product
+    vs = (row.get("volume_standard") or "").strip() if isinstance(row.get("volume_standard"), str) else (row.get("volume_standard") or "")
+    if isinstance(vs, str) and vs.strip():
+        return vs.strip()
+    return _size_from_product(row.get("Product", ""))
 
 def _ogcv(x) -> str:
     try:
@@ -70,7 +77,7 @@ def _family_from_product(p: str) -> str:
     return "Others"
 
 def _norm_name(x: str) -> str:
-    """Normaliza nombres para agrupar (p.ej. 'global mex' vs 'Global Mex')."""
+    """Normaliza nombres para agrupar (p.ej. 'global mex' vs 'Global mex')."""
     if not isinstance(x, str):
         return ""
     s = x.strip()
@@ -180,7 +187,7 @@ if day_df.empty:
 day_df["Shipper"] = day_df["VendorClean"]
 day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
 day_df["Where"]   = day_df["Location"]
-day_df["Size"]    = day_df["Product"].apply(_size_from_product)
+day_df["Size"]    = day_df.apply(_choose_size, axis=1)  # Usa volume_standard si existe; si no, extrae del Product
 day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
 day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
@@ -224,27 +231,28 @@ elif sort_opt == "Price (desc)":
 else:
     day_df = day_df.sort_values(sort_opt)
 
-# ---------- Modo edición (todas las variables excepto la fecha) ----------
+# ---------- Modo edición (incluye Size -> volume_standard) ----------
 st.divider()
 edit_mode = st.toggle(
     "✏️ Modo edición (todo excepto fecha)",
     value=False,
-    help="Edita Shipper, Where, Product, OG/CV, Price, Volume Qty/Unit. La fecha permanece bloqueada."
+    help="Edita Shipper, Where, Product, Size, OG/CV, Price, Volume Qty/Unit. La fecha permanece bloqueada."
 )
 
 if edit_mode:
-    # Nombres EXACTOS de columnas en BD (minúsculas)
-    # (Las columnas reales en PostgREST: vendorclean, location, product, organic, price, volume_num, volume_unit)
+    # Columnas exactas de BD y derivadas necesarias para edición
     edit_df = day_df[[
-        "id", "cotization_date", "VendorClean", "Location", "Product", "Organic", "Price", "volume_num", "volume_unit"
+        "id", "cotization_date", "VendorClean", "Location", "Product",
+        "volume_standard", "Organic", "Price", "volume_num", "volume_unit"
     ]].copy()
 
-    # Renombramos a alias legibles para la UI; dejamos 'organic' y 'price' ya con los nombres target de BD
+    # Renombramos para la UI
     edit_df = edit_df.rename(columns={
         "VendorClean": "Shipper",
         "Location": "Where",
+        "volume_standard": "Size",   # UI expone "Size" pero se guarda en volume_standard
         "Organic": "organic",
-        "Price": "price"
+        "Price": "price",
     })
 
     col_config = {
@@ -253,6 +261,7 @@ if edit_mode:
         "Shipper": st.column_config.TextColumn("Shipper"),
         "Where": st.column_config.TextColumn("Where"),
         "Product": st.column_config.TextColumn("Product"),
+        "Size": st.column_config.TextColumn("Size"),  # editable
         "organic": st.column_config.NumberColumn("OG/CV (1=OG,0=CV)", min_value=0, max_value=1, step=1),
         "price": st.column_config.NumberColumn("Price", min_value=0.0, step=0.01),
         "volume_num": st.column_config.NumberColumn("Volume Qty", min_value=0.0, step=0.01),
@@ -266,13 +275,13 @@ if edit_mode:
         num_rows="fixed",
         use_container_width=True,
         column_config=col_config,
-        column_order=["id","cotization_date","Shipper","Where","Product","organic","price","volume_num","volume_unit"]
+        column_order=["id","cotization_date","Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]
     )
 
     if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
         # 1) Detectar diferencias (usando alias de UI)
-        ORIG = edit_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
-        NEW  = edited_df.set_index("id")[["Shipper","Where","Product","organic","price","volume_num","volume_unit"]]
+        ORIG = edit_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
+        NEW  = edited_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
 
         changed_mask = (ORIG != NEW) & ~(ORIG.isna() & NEW.isna())
         dirty_ids = NEW.index[changed_mask.any(axis=1)].tolist()
@@ -303,6 +312,7 @@ if edit_mode:
                     "vendorclean": ui_row.get("Shipper"),
                     "location": ui_row.get("Where"),
                     "product": ui_row.get("Product"),
+                    "volume_standard": ui_row.get("Size"),   # << guarda Size en volume_standard
                     "organic": ui_row.get("organic"),
                     "price": ui_row.get("price"),
                     "volume_num": ui_row.get("volume_num"),
@@ -329,16 +339,23 @@ if edit_mode:
 
                 # 4) Refrescar en memoria day_df (volviendo de alias UI a nombres de day_df)
                 upd = NEW.loc[dirty_ids].reset_index()
-                upd = upd.rename(columns={"Shipper":"VendorClean","Where":"Location","price":"Price"})
+                upd = upd.rename(columns={
+                    "Shipper":"VendorClean",
+                    "Where":"Location",
+                    "price":"Price",
+                    "Size":"volume_standard",   # << reflejar en day_df
+                })
                 for _, r in upd.iterrows():
                     mask = day_df["id"] == r["id"]
-                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit"]:
+                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit","volume_standard"]:
                         if col in r and pd.notna(r[col]):
                             day_df.loc[mask, col] = r[col]
+
                 # Derivadas:
                 day_df["Shipper"] = day_df["VendorClean"]
                 day_df["Where"]   = day_df["Location"]
                 day_df["Price$"]  = day_df["Price"].apply(_format_price)
+                day_df["Size"]    = day_df.apply(_choose_size, axis=1)
 
             except Exception as e:
                 st.error(f"Error al guardar cambios: {e}")
@@ -390,7 +407,6 @@ else:
             st.metric("Ofertas visibles", f"{len(viz_day)}")
 
         # ---- 1) Precio promedio por ubicación (barras) ----
-        from itertools import chain
         g_loc = (viz_day.groupby("Where_norm", as_index=False)
                         .agg(avg_price=("price_num","mean"),
                              offers=("Where_norm","count")))
@@ -438,7 +454,7 @@ else:
             ).properties(title="Precio promedio por producto (según tabla)", height=350)
             st.altair_chart(chart_prod, use_container_width=True)
 
-        # ---- 5) Scatter Precio vs Volumen (para detectar “ofertas gordas”/outliers) ----
+        # ---- 5) Scatter Precio vs Volumen (outliers) ----
         if viz_day["volume_num"].fillna(0).sum() > 0:
             scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
                 x=alt.X("price_num:Q", title="Precio"),
@@ -449,7 +465,7 @@ else:
             ).properties(title="Precio vs Volumen (según tabla)", height=320)
             st.altair_chart(scatter, use_container_width=True)
 
-        # ---- 6) Tabla de extremos: Top/Bottom precios visibles ----
+        # ---- 6) Tabla de extremos ----
         with st.expander("🔎 Ver extremos de precio (tabla visible)"):
             tmp = viz_day[["Product","Shipper","Where","price_num","Volume?"]].dropna(subset=["price_num"]).copy()
             tmp = tmp.sort_values("price_num")
