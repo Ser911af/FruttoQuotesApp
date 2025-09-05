@@ -1,174 +1,480 @@
-import streamlit as st
-import pandas as pd
+# -*- coding: utf-8 -*-
+# Streamlit page: Upload Quotes — Paste Mode
+# Autor: Sergio + ChatGPT (FruttoFoods)
+# Descripción: Pega cotizaciones (desde Excel/Email/Sheets), normaliza y sube a Supabase.
+
 import os
-import altair as alt
+import io
+import re
+import datetime as dt
+from typing import Dict, List, Tuple
+
+import pandas as pd
+import numpy as np
+import streamlit as st
+
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None  # Supabase opcional en local/dev
 
 # ------------------------
-# FruttoFoods Explorer (Supabase)
+# Page config
 # ------------------------
-st.set_page_config(page_title="FruttoFoods Explorer", layout="wide")
+st.set_page_config(page_title="Upload Quotes — Paste Mode", page_icon="📋", layout="wide")
+st.title("📋 Ingesta de Cotizaciones (pegar desde portapapeles)")
+st.caption("Pega tus cotizaciones tal cual salen de Excel/Email/Sheets. Valido, normalizo y subo a la base.")
 
-LOGO_PATH   = "data/Asset 7@4x.png"
-BRAND_GREEN = "#8DC63F"
+# ------------------------
+# Utilidades globales
+# ------------------------
+def _get_secret(name: str):
+    """Primero busca en st.secrets, si no, en variables de entorno."""
+    try:
+        return st.secrets[name]
+    except Exception:
+        return os.getenv(name)
 
-def organic_to_num(val):
-    if val == 'Conventional': return 0
-    if val == 'Organic':     return 1
+# Limpia cache al iniciar; útil si Streamlit conserva funciones viejas
+st.cache_data.clear()
+with st.sidebar:
+    hoy = pd.Timestamp.now(tz="America/Bogota").strftime("%-m/%-d/%Y") if os.name != "nt" else pd.Timestamp.now(tz="America/Bogota").strftime("%#m/%#d/%Y")
+    st.markdown(f"**Fecha (America/Bogota):** {hoy}")
+    if st.button("🔄 Limpiar caché"):
+        st.cache_data.clear()
+        st.success("Cache limpia. Presiona Rerun.")
+
+# ------------------------
+# Constantes y helpers
+# ------------------------
+EXCEL_EPOCH = dt.date(1899, 12, 30)  # Excel date origin
+STANDARD_COLS = [
+    "Date", "Supplier", "OG/CV", "Product", "Size", "Volume", "Price", "Where", "Concat", "Date2"
+]
+
+def _cot_date_to_mmddyy_text(val):
+    """
+    Devuelve siempre 'mmddyy' (cero-rellenado, solo dígitos).
+    Acepta:
+      - pandas.Timestamp / datetime / date
+      - 'mmddyy' (p.ej. '082525')
+      - 'mm/dd/yy', 'mm/dd/yyyy', 'm/d/yyyy'
+      - seriales de Excel (int/float razonables)
+      - strings parseables por pandas
+    """
+    if val is None or (isinstance(val, float) and pd.isna(val)) or (isinstance(val, str) and val.strip() == ""):
+        return None
+
+    # 1) intento directo con pandas
+    try:
+        d = pd.to_datetime(val, errors="raise").date()
+        return d.strftime("%m%d%y")
+    except Exception:
+        pass
+
+    # 2) 'mmddyy' exacto -> valida y retorna estandarizado
+    if isinstance(val, str) and re.fullmatch(r"\d{6}", val):
+        mm, dd, yy = int(val[:2]), int(val[2:4]), int(val[4:])
+        try:
+            _ = dt.date(2000 + yy, mm, dd)
+            return f"{mm:02d}{dd:02d}{yy:02d}"
+        except Exception:
+            return None
+
+    # 3) serial de Excel
+    if isinstance(val, (int, float)) and not pd.isna(val):
+        try:
+            d = EXCEL_EPOCH + dt.timedelta(days=int(val))
+            return d.strftime("%m%d%y")
+        except Exception:
+            pass
+
+    # 4) parse genérico
+    if isinstance(val, str):
+        try:
+            d = pd.to_datetime(val, errors="raise").date()
+            return d.strftime("%m%d%y")
+        except Exception:
+            pass
+
     return None
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_quotations_from_supabase():
-    """Trae quotations paginado; ante errores devuelve DF vacío (no rompe UI)."""
-    try:
-        from supabase import create_client
-    except Exception as e:
-        st.error(f"Falta 'supabase' en requirements: {e}")
+@st.cache_data(show_spinner=False)
+def _detect_separator(sample: str) -> str:
+    if "\t" in sample:
+        return "\t"
+    comma = sample.count(",")
+    semicolon = sample.count(";")
+    pipe = sample.count("|")
+    if comma > semicolon and comma > pipe:
+        return ","
+    if semicolon >= comma and semicolon > pipe:
+        return ";"
+    if pipe > 0:
+        return "|"
+    # Fallback: columnas separadas por múltiples espacios
+    return r"\s{2,}"
+
+@st.cache_data(show_spinner=False)
+def _read_pasted(text: str) -> pd.DataFrame:
+    text = text.strip().replace("\r\n", "\n")
+    if not text:
         return pd.DataFrame()
-
-    try:
-        SUPABASE_URL = st.secrets["SUPABASE_URL"]
-        SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
-    except Exception:
-        st.error("No encontré SUPABASE_URL / SUPABASE_ANON_KEY en secrets.")
-        return pd.DataFrame()
-
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-    frames, page_size = [], 1000
-    for i in range(1000):
-        start, end = i*page_size, i*page_size + page_size - 1
-        try:
-            resp = (sb.table("quotations")
-                      .select("cotization_date,organic,product,price,location,volume_num,volume_unit,volume_standard,vendorclean")
-                      .range(start, end)
-                      .execute())
-        except Exception as e:
-            st.error(f"Error consultando Supabase: {e}")
-            return pd.DataFrame()
-
-        rows = resp.data or []
-        if not rows: break
-        frames.append(pd.DataFrame(rows))
-        if len(rows) < page_size: break
-
-    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if df.empty: return df
-
-    # Validación básica
-    needed = ["cotization_date","organic","product","price","location",
-              "volume_num","volume_unit","volume_standard","vendorclean"]
-    miss = [c for c in needed if c not in df.columns]
-    if miss:
-        st.error(f"Faltan columnas en Supabase: {miss}")
-        return pd.DataFrame()
-
-    # Normalización
-    df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
-    df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
-    df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
-    df = df.dropna(subset=["Price"])
-
-    vol_std = pd.to_numeric(df["volume_standard"], errors="coerce")
-    vol_num = pd.to_numeric(df["volume_num"], errors="coerce")
-    df["volume_standard"] = vol_std.fillna(vol_num).fillna(1)
-    df["volume_unit"]     = df["volume_unit"].astype(str).fillna("unit")
-    df["price_per_unit"]  = df["Price"] / df["volume_standard"]
-
-    df = df.rename(columns={"product":"Product","location":"Location","vendorclean":"VendorClean"})
-    df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
-    df = df.sort_values("cotization_date", ascending=False)
+    sep = _detect_separator(text)
+    buf = io.StringIO(text)
+    if sep == r"\s{2,}":
+        rows = [re.split(r"\s{2,}", ln.strip()) for ln in text.splitlines() if ln.strip()]
+        width = max(len(r) for r in rows)
+        rows = [r + [None] * (width - len(r)) for r in rows]
+        df = pd.DataFrame(rows[1:], columns=rows[0])
+    else:
+        df = pd.read_csv(buf, sep=sep)
+    df.columns = [str(c).strip() for c in df.columns]
     return df
 
-# ---------- UI ----------
-df = fetch_all_quotations_from_supabase()
+@st.cache_data(show_spinner=False)
+def _suggest_mappings(cols: List[str]) -> Dict[str, str]:
+    mapping = {}
+    lowered = {c.lower(): c for c in cols}
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.title("FruttoFoods Quotation Tool")
-with col2:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=80)
-    else:
-        st.warning("Logo no encontrado en data/Asset 7@4x.png")
+    def find(*candidates):
+        for cand in candidates:
+            for k, orig in lowered.items():
+                if cand in k:
+                    return orig
+        return None
 
-st.sidebar.header("Quotation Filters")
+    mapping["Date"]     = find("date", "fecha")
+    mapping["Supplier"] = find("supplier", "seller", "vendor", "provee")
+    mapping["OG/CV"]    = find("og/cv", "og", "cv")
+    mapping["Product"]  = find("product", "item")
+    mapping["Size"]     = find("size", "pack")
+    mapping["Volume"]   = find("volume", "qty", "quantity", "volumen")
+    mapping["Price"]    = find("price", "usd", "$", "precio")
+    mapping["Where"]    = find("where", "city", "location", "loc", "nogales", "mcallen", "pharr")
+    mapping["Concat"]   = lowered.get("concat")
+    mapping["Date2"]    = lowered.get("date2")
+    return mapping
 
-if df.empty:
-    st.sidebar.info("Sin datos disponibles desde Supabase.")
-    st.info("Sin datos para mostrar.")
-    st.stop()
-
-# 1) Products
-all_products = sorted(df['Product'].dropna().unique().tolist())
-products = st.sidebar.multiselect("Products", options=all_products, default=all_products)
-
-# 2) Location
-locs_for_product = df[df['Product'].isin(products)]['Location'].dropna().unique()
-locs_for_product = sorted(locs_for_product.tolist())
-locations = st.sidebar.multiselect("Location", options=locs_for_product, default=locs_for_product)
-
-# 3) Organic
-sub = df[df['Product'].isin(products)]
-if locations:
-    sub = sub[sub['Location'].isin(locations)]
-org_vals = sorted([v for v in sub['Organic'].dropna().unique().tolist() if v in (0,1)])
-org_map  = {0:'Conventional', 1:'Organic'}
-org_options = ['All'] + [org_map[o] for o in org_vals]
-organic = st.sidebar.selectbox("Organic Status", org_options)
-
-# 4) Volume Unit
-sub2 = sub.copy()
-if organic != 'All':
-    sub2 = sub2[sub2['Organic'] == (0 if organic=='Conventional' else 1)]
-vu_opts = sorted([v for v in sub2['volume_unit'].dropna().unique().tolist() if v])
-volume_unit = st.sidebar.selectbox("Volume Unit", ['All'] + vu_opts)
-
-# Filtros
-g = df[df['Product'].isin(products)] if products else df.copy()
-if locations: g = g[g['Location'].isin(locations)]
-if organic != 'All': g = g[g['Organic'] == (0 if organic=='Conventional' else 1)]
-if volume_unit != 'All': g = g[g['volume_unit'] == volume_unit]
-
-# Tabla
-if g.empty:
-    st.warning("No hay datos para los filtros seleccionados.")
-else:
-    display = g.rename(columns={
-        'cotization_date': 'Date',
-        'volume_unit': 'Volume Unit',
-        'price_per_unit': 'Price per Unit',
-        'VendorClean': 'Vendor'
-    })[['Date','Product','Location','Volume Unit','Price per Unit','Vendor']]
-
-    display['Date'] = pd.to_datetime(display['Date'], errors='coerce')
-    display = display.sort_values(by=['Date'], ascending=[False])
-    display['Date'] = display['Date'].dt.strftime("%m/%d/%Y")
-    display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
-
-    st.subheader("Filtered Quotations")
-    st.dataframe(display, use_container_width=True)
-
-    # Métricas
-    st.subheader("Key Metrics")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Min Price/Unit", f"${g['price_per_unit'].min():.2f}")
-    c2.metric("Max Price/Unit", f"${g['price_per_unit'].max():.2f}")
-    c3.metric("Avg Price/Unit", f"${g['price_per_unit'].mean():.2f}")
-
-    # Chart
-    st.subheader("Average Price/Unit by Vendor")
-    if not g['VendorClean'].dropna().empty:
-        avg_vendor = g.groupby('VendorClean', dropna=True)['price_per_unit'].mean().reset_index()
-        if not avg_vendor.empty:
-            chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
-                x=alt.X('VendorClean:N', title='Vendor', sort='-y'),
-                y=alt.Y('price_per_unit:Q', title='Avg Price/Unit')
-            )
-            st.altair_chart(chart, use_container_width=True)
-            best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
-            st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
+@st.cache_data(show_spinner=False)
+def _normalize(df: pd.DataFrame, colmap: Dict[str, str]) -> pd.DataFrame:
+    """Normaliza columnas base. NO parsea Volume; se hace luego con la nueva lógica."""
+    out = pd.DataFrame()
+    for std_col, src in colmap.items():
+        if src and src in df.columns:
+            out[std_col] = df[src]
         else:
-            st.info("No hay datos agregables por Vendor con los filtros actuales.")
-    else:
-        st.info("No hay Vendors en el conjunto filtrado.")
+            out[std_col] = None
 
+    # Date → datetime; se convertirá a mmddyy al generar el payload
+    if out["Date"].notna().any():
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce", dayfirst=False, infer_datetime_format=True)
+    else:
+        out["Date"] = pd.NaT
+
+    # OG/CV
+    out["OG/CV"] = out["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
+
+    # Limpieza básica de texto
+    for col in ["Product", "Size", "Where", "Supplier", "Volume"]:
+        out[col] = (
+            out[col]
+            .astype(str)
+            .str.strip()
+            .replace({"None": None, "nan": None, "": None})
+        )
+
+    # Price → num (sin $ ni comas; corrige decimales malformados)
+    out["Price"] = (
+        out["Price"].astype(str)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace(r"(\d)\.(\.)+(\d)", r"\1.\3", regex=True)  # 10..95 → 10.95
+        .str.replace(",", ".", regex=False)                    # 8,5 → 8.5
+        .str.extract(r"([0-9]+(?:\.[0-9]+)?)", expand=False)
+        .astype(float)
+    )
+
+    # Concat (si no viene): serial excel + Product + Size (sin nulos)
+    needs_concat = out.get("Concat").isna().all()
+    if needs_concat:
+        excel_serial = out["Date"].dt.date.apply(lambda d: (d - EXCEL_EPOCH).days if pd.notna(d) else None)
+        out["Concat"] = excel_serial.astype("Int64").astype(str) + out["Product"].fillna("") + out["Size"].fillna("")
+
+    # Date2 (flag de compatibilidad)
+    if out.get("Date2").isna().all():
+        out["Date2"] = 1
+
+    out = out[STANDARD_COLS]
+    return out
+
+def _validate(df: pd.DataFrame) -> List[str]:
+    issues = []
+    required = ["Date", "Supplier", "OG/CV", "Product", "Price", "Where"]
+    for col in required:
+        if df[col].isna().all():
+            issues.append(f"Columna requerida vacía: {col}")
+    if df["Date"].isna().any():
+        issues.append("Hay filas con fecha inválida.")
+    if (df["OG/CV"].isna()).any():
+        issues.append("Valores OG/CV no detectados (usa 'OG' o 'CV').")
+    if (df["Price"].isna()).any():
+        issues.append("Precios con formato inválido.")
+    return issues
+
+# ------------------------
+# Volume parsing (nueva lógica)
+# ------------------------
+_VOL_PATTERNS: List[Tuple[str, str]] = [
+    (r"\b(\d+)\s*(?:p|plt|plts|pallets?|tarimas?)\b", "PALLETS"),   # Pallets
+    (r"\b(\d+)\s*(?:loads?|ld|tl|trucks?|trk)\b", "LOADS"),         # Loads/TL/Truck
+    (r"\b(\d+)\s*(?:cs|ctn|cases?|cajas?|caj)\b", "CS"),            # Cases
+]
+_NEAR_SIZE = re.compile(
+    r"[/x#–-]|(?:\b\d+\s*(?:ct|lb|lbs?|kg|g)\b)|(?:\b\d+\s*[-–]\s*\d+\b)",
+    re.IGNORECASE
+)
+
+def _parse_volume_from_texts(product: str, size: str, volume: str):
+    """
+    Retorna (volume_num, volume_unit, volume_standard)
+    """
+    parts = [p for p in [str(volume) if volume else None, str(product) if product else None, str(size) if size else None] if p and p != "None"]
+    if not parts:
+        return None, None, None
+
+    s = " " + " ".join(parts).lower().strip() + " "
+    s_nosp = " ".join(s.split())
+
+    # RANGOS tipo '6-8 plt' → nulls
+    if re.search(r"\b\d+\s*[-–]\s*\d+\s*(?:p|plt|plts|pallets?|tarimas?|cs|ctn|cases?)\b", s_nosp, re.IGNORECASE):
+        return None, None, None
+
+    # CANTIDAD + UNIDAD (con antirruido de pack/talla)
+    for pat, unit_norm in _VOL_PATTERNS:
+        for m in re.finditer(pat, s_nosp, re.IGNORECASE):
+            start = max(0, m.start() - 8)
+            context = s_nosp[start:m.start()]
+            if _NEAR_SIZE.search(context):
+                continue
+            try:
+                n = int(m.group(1))
+                if unit_norm == "PALLETS":
+                    return n, "PALLETS", "pallet"
+                if unit_norm == "LOADS":
+                    return n, "LOADS", "load"
+                if unit_norm == "CS":
+                    return n, "CS", "case"
+            except:
+                continue
+
+    # CATEGORÍAS SIN NÚMERO (aceptadas)
+    if re.search(r"\bvolume|volumen\b", s_nosp):
+        return None, "VOLUME", "category"
+    if re.search(r"\blimited|limitado\b", s_nosp):
+        return None, "LIMITED", "category"
+    if re.search(r"\bn/?a\b", s_nosp):
+        return None, "NA", "category"
+
+    # (Opcional) Caso especial 'vol-#7s'
+    m_special = re.search(r"vol-\s*#\s*(\d+)\s*s\b", s_nosp)
+    if m_special:
+        return int(m_special.group(1)), "s", None
+
+    return None, None, None
+
+def _parse_volume_fields(df_norm: pd.DataFrame) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    nums, units, stds = [], [], []
+    for _, row in df_norm.iterrows():
+        n, u, s = _parse_volume_from_texts(row.get("Product"), row.get("Size"), row.get("Volume"))
+        nums.append(n); units.append(u); stds.append(s)
+    return pd.Series(nums), pd.Series(units), pd.Series(stds)
+
+# ------------------------
+# Supabase - normalización final y upload
+# ------------------------
+def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame()
+
+    # Fecha -> mmddyy (solo dígitos)
+    out["cotization_date"] = df_norm["Date"].apply(_cot_date_to_mmddyy_text)
+
+    # OG/CV -> 0/1
+    ogcv = df_norm["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
+    out["organic"] = (ogcv == "OG").astype(int)
+
+    out["product"]  = df_norm["Product"]
+    out["location"] = df_norm["Where"]
+    out["concat"]   = df_norm["Concat"]
+    out["price"]    = df_norm["Price"]
+
+    # NUEVO: talla/grade original
+    out["size_text"] = df_norm["Size"]
+
+    # Volumen (nueva lógica)
+    vol_num, vol_unit, vol_std = _parse_volume_fields(df_norm)
+    out["volume_num"]      = vol_num
+    out["volume_unit"]     = vol_unit
+    out["volume_standard"] = vol_std
+
+    out["vendorclean"]       = df_norm["Supplier"].astype(str).str.strip()
+    out["source_chat_id"]    = None
+    out["source_message_id"] = None
+
+    cols = [
+        "cotization_date","organic","product","price","location","concat",
+        "size_text",  # <--- NUEVO
+        "volume_num","volume_unit","volume_standard",
+        "vendorclean","source_chat_id","source_message_id"
+    ]
+    return out[cols]
+
+def upload_to_supabase_for_quotations(df_norm: pd.DataFrame) -> str:
+    url = _get_secret("SUPABASE_URL")
+    key = _get_secret("SUPABASE_KEY")
+    table_name = os.getenv("SUPABASE_TABLE", "quotations")
+    if not url or not key:
+        return "Faltan SUPABASE_URL o SUPABASE_KEY (en st.secrets o variables de entorno)."
+    if create_client is None:
+        return "Paquete 'supabase' no disponible. Instala 'supabase' (supabase-py)."
+
+    client = create_client(url, key)
+
+    df_q = _normalize_to_quotations(df_norm)
+    # JSON-safe (None en lugar de NaN)
+    df_q = df_q.astype(object).where(pd.notnull(df_q), None)
+    records = df_q.to_dict(orient="records")
+
+    try:
+        client.table(table_name).upsert(
+            records,
+            on_conflict=(
+                "cotization_date,organic,product,price,location,concat,"
+                "volume_num,volume_unit,volume_standard,vendorclean,"
+                "source_chat_id,source_message_id"
+            )
+        ).execute()
+        return f"Subida completa: {len(records)} filas a '{table_name}'."
+    except Exception as e:
+        return f"Error al subir: {e}"
+
+# =====================
+# Diagnóstico rápido
+# =====================
+with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
+    url_probe = _get_secret("SUPABASE_URL")
+    key_probe = _get_secret("SUPABASE_KEY")
+    table_probe = os.getenv("SUPABASE_TABLE", st.secrets.get("SUPABASE_TABLE", "quotations")) if hasattr(st, "secrets") else os.getenv("SUPABASE_TABLE", "quotations")
+
+    st.write("URL presente:", bool(url_probe))
+    st.write("KEY presente:", bool(key_probe))
+    st.write("Tabla destino:", table_probe)
+
+    def _test_insert_row():
+        if not url_probe or not key_probe:
+            return False, "Faltan SUPABASE_URL o SUPABASE_KEY."
+        if create_client is None:
+            return False, "Paquete 'supabase' no disponible."
+        client = create_client(url_probe, key_probe)
+        now = pd.Timestamp.utcnow().tz_localize(None).date()
+        payload = [{
+            "cotization_date": _cot_date_to_mmddyy_text(now),
+            "organic": 0,
+            "product": "_probe_streamlit_",
+            "price": 0.01,
+            "location": "diagnostic",
+            "concat": f"diag-{int(pd.Timestamp.utcnow().timestamp())}",
+            "size_text": "Fancy",  # ejemplo
+            "volume_num": None,
+            "volume_unit": None,
+            "volume_standard": None,
+            "vendorclean": "_probe_vendor_",
+            "source_chat_id": "streamlit",
+            "source_message_id": str(int(pd.Timestamp.utcnow().timestamp()))
+        }]
+        try:
+            client.table(table_probe).upsert(
+                payload,
+                on_conflict=(
+                    "cotization_date,organic,product,price,location,concat,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "source_chat_id,source_message_id"
+                )
+            ).execute()
+            return True, f"Inserción/Upsert OK en '{table_probe}'."
+        except Exception as e:
+            return False, f"Error al upsert: {e}"
+
+    if st.button("Probar conexión e insertar fila de diagnóstico", key="probe_btn"):
+        ok, msg = _test_insert_row()
+        (st.success if ok else st.error)(msg)
+
+# ------------------------
+# UI — Pegar y parsear
+# ------------------------
+st.subheader("1) Pega tus cotizaciones aquí")
+st.write("Asegúrate de incluir **encabezados** en la primera fila.")
+
+pasted = st.text_area("Pegar datos", value="", height=220, placeholder=(
+    "Ejemplo de encabezados:\n"
+    "Date\tSupplier\tOG/CV\tProduct\tSize\tVolume\tPrice\tWhere\n"
+    "9/1/2025\tWholesum\tOG\teggplant\t\tVOLUME\t16.95\tMcAllen\n"
+))
+
+if pasted:
+    raw_df = _read_pasted(pasted)
+    if raw_df.empty:
+        st.error("No pude leer la tabla pegada. Revisa delimitadores o encabezados.")
+        st.stop()
+    st.success(f"Detecté {raw_df.shape[0]} filas × {raw_df.shape[1]} columnas.")
+
+    st.subheader("2) Mapea columnas")
+    suggested = _suggest_mappings(list(raw_df.columns))
+    colmap = {}
+    cols = list(raw_df.columns)
+    for std_col in STANDARD_COLS:
+        colmap[std_col] = suggested.get(std_col)
+
+    # Normalizar base
+    norm_df = _normalize(raw_df, colmap)
+
+    # 3a) Previsualización normalizada (entrada estándar)
+    st.subheader("3a) Previsualización normalizada (entrada estándar)")
+    _preview_norm = norm_df.copy()
+    if "Date" in _preview_norm.columns:
+        try:
+            _preview_norm["Date"] = _preview_norm["Date"].dt.date
+        except Exception:
+            pass
+    st.dataframe(_preview_norm, use_container_width=True)
+
+    # 3b) Payload a subir (lo que va a Supabase)
+    st.subheader("3b) Payload a subir (Vista previa)")
+    preview_payload = _normalize_to_quotations(norm_df).copy()
+    st.dataframe(preview_payload, use_container_width=True)
+
+    # 3c) Advertencias (si las hay)
+    problems_preview = _validate(norm_df)
+
+    st.markdown("---")
+    st.subheader("4) Subir estas filas ahora → tabla `quotations`")
+    st.caption("Usa anon key con RLS. Se hace upsert usando TODAS las columnas de negocio como clave de conflicto.")
+
+    allow_upload_now = True
+    if problems_preview:
+        with st.expander("Ver advertencias antes de subir"):
+            for p in problems_preview:
+                st.warning(p)
+        allow_upload_now = st.checkbox(
+            "Entiendo las advertencias y deseo subir de todos modos",
+            value=False,
+            key="allow_upload_now_cb",
+        )
+
+    if st.button("⬆️ Subir estas filas ahora", type="primary", disabled=not allow_upload_now, key="upload_now_main"):
+        with st.spinner("Subiendo a Supabase..."):
+            msg = upload_to_supabase_for_quotations(norm_df)
+        (st.success if msg.startswith("Subida completa") else st.error)(msg)
+
+    st.markdown("---")
+    st.caption("Fin de la lógica de subida unificada — Upload Quotes — Paste Mode")
