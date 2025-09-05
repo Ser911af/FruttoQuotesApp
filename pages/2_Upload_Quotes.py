@@ -323,6 +323,14 @@ def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
     # Price ya viene numérico desde _normalize
     out["price"] = df_norm["Price"]
 
+    # 👉 NUEVO: size_text (guardar la talla/calidad original que vino en 'Size')
+    out["size_text"] = (
+        df_norm["Size"]
+        .astype(str)
+        .str.strip()
+        .replace({"None": None, "nan": None, "": None})
+    )
+
     # Volumen (nueva lógica)
     vol_num, vol_unit, vol_std = _parse_volume_fields(df_norm)
     out["volume_num"] = vol_num
@@ -335,6 +343,7 @@ def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
 
     cols = [
         "cotization_date","organic","product","price","location","concat",
+        "size_text",  # 👉 NUEVO: queda incluido en el payload final
         "volume_num","volume_unit","volume_standard","vendorclean",
         "source_chat_id","source_message_id"
     ]
@@ -395,6 +404,7 @@ with st.expander("🧪 Diagnóstico de Supabase (opcional)"):
             "price": 0.01,
             "location": "diagnostic",
             "concat": f"diag-{int(pd.Timestamp.utcnow().timestamp())}",
+            "size_text": "Fancy",  # ejemplo de prueba
             "volume_num": None,
             "volume_unit": None,
             "volume_standard": None,
