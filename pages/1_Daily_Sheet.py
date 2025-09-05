@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Versión visible para confirmar despliegue ----
-VERSION = "Daily_Sheet v2025-09-04 - edición Size (volume_standard)"
+VERSION = "Daily_Sheet v2025-09-05 - Size desde size_text (fallback volume_standard)"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -33,10 +33,15 @@ def _size_from_product(p: str) -> str:
     return m.group(1) if m else ""
 
 def _choose_size(row) -> str:
-    # Prioriza el size normalizado de BD; si no existe, intenta extraerlo del Product
-    vs = (row.get("volume_standard") or "").strip() if isinstance(row.get("volume_standard"), str) else (row.get("volume_standard") or "")
+    # 1) Prioriza size_text (talla/grade original que subimos desde Upload Quotes)
+    stxt = row.get("size_text")
+    if isinstance(stxt, str) and stxt.strip():
+        return stxt.strip()
+    # 2) Fallback legacy: volume_standard (evita confundir con unidades, pero lo dejamos por compatibilidad)
+    vs = row.get("volume_standard")
     if isinstance(vs, str) and vs.strip():
         return vs.strip()
+    # 3) Último recurso: inferir desde Product
     return _size_from_product(row.get("Product", ""))
 
 def _ogcv(x) -> str:
@@ -110,7 +115,11 @@ def fetch_all_quotations_from_supabase():
         try:
             resp = (
                 sb.table("quotations")
-                  .select("id,cotization_date,organic,product,price,location,volume_num,volume_unit,volume_standard,vendorclean")
+                  .select(
+                      "id,cotization_date,organic,product,price,location,"
+                      "volume_num,volume_unit,volume_standard,vendorclean,"
+                      "size_text"   # <-- trae talla/grade original
+                  )
                   .range(start, end)
                   .execute()
             )
@@ -134,6 +143,9 @@ def fetch_all_quotations_from_supabase():
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
     df["volume_unit"] = df["volume_unit"].astype(str).fillna("unit")
+    # Asegura columna size_text presente como string o NaN
+    if "size_text" not in df.columns:
+        df["size_text"] = pd.NA
     df = df.rename(columns={"product":"Product","location":"Location","vendorclean":"VendorClean"})
     return df
 
@@ -187,7 +199,7 @@ if day_df.empty:
 day_df["Shipper"] = day_df["VendorClean"]
 day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
 day_df["Where"]   = day_df["Location"]
-day_df["Size"]    = day_df.apply(_choose_size, axis=1)  # Usa volume_standard si existe; si no, extrae del Product
+day_df["Size"]    = day_df.apply(_choose_size, axis=1)  # Size desde size_text; fallback volume_standard -> heurística
 day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
 day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
@@ -231,26 +243,26 @@ elif sort_opt == "Price (desc)":
 else:
     day_df = day_df.sort_values(sort_opt)
 
-# ---------- Modo edición (incluye Size -> volume_standard) ----------
+# ---------- Modo edición (Size edita size_text) ----------
 st.divider()
 edit_mode = st.toggle(
     "✏️ Modo edición (todo excepto fecha)",
     value=False,
-    help="Edita Shipper, Where, Product, Size, OG/CV, Price, Volume Qty/Unit. La fecha permanece bloqueada."
+    help="Edita Shipper, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. La fecha permanece bloqueada."
 )
 
 if edit_mode:
     # Columnas exactas de BD y derivadas necesarias para edición
     edit_df = day_df[[
         "id", "cotization_date", "VendorClean", "Location", "Product",
-        "volume_standard", "Organic", "Price", "volume_num", "volume_unit"
+        "size_text", "Organic", "Price", "volume_num", "volume_unit"
     ]].copy()
 
     # Renombramos para la UI
     edit_df = edit_df.rename(columns={
         "VendorClean": "Shipper",
         "Location": "Where",
-        "volume_standard": "Size",   # UI expone "Size" pero se guarda en volume_standard
+        "size_text": "Size",   # UI expone "Size" y lo guarda en size_text
         "Organic": "organic",
         "Price": "price",
     })
@@ -261,7 +273,7 @@ if edit_mode:
         "Shipper": st.column_config.TextColumn("Shipper"),
         "Where": st.column_config.TextColumn("Where"),
         "Product": st.column_config.TextColumn("Product"),
-        "Size": st.column_config.TextColumn("Size"),  # editable
+        "Size": st.column_config.TextColumn("Size (size_text)"),  # editable -> size_text
         "organic": st.column_config.NumberColumn("OG/CV (1=OG,0=CV)", min_value=0, max_value=1, step=1),
         "price": st.column_config.NumberColumn("Price", min_value=0.0, step=0.01),
         "volume_num": st.column_config.NumberColumn("Volume Qty", min_value=0.0, step=0.01),
@@ -307,12 +319,12 @@ if edit_mode:
                 except Exception:
                     pass
 
-                # Mapeo UI -> BD
+                # Mapeo UI -> BD (guardamos Size en size_text)
                 db_row = {
                     "vendorclean": ui_row.get("Shipper"),
                     "location": ui_row.get("Where"),
                     "product": ui_row.get("Product"),
-                    "volume_standard": ui_row.get("Size"),   # << guarda Size en volume_standard
+                    "size_text": ui_row.get("Size"),      # <-- guardar talla en size_text
                     "organic": ui_row.get("organic"),
                     "price": ui_row.get("price"),
                     "volume_num": ui_row.get("volume_num"),
@@ -337,17 +349,17 @@ if edit_mode:
                 st.success(f"Se actualizaron {len(payload)} registro(s). 🎉")
                 st.balloons()
 
-                # 4) Refrescar en memoria day_df (volviendo de alias UI a nombres de day_df)
+                # 4) Refrescar day_df: actualizar columnas renombradas/derivadas
                 upd = NEW.loc[dirty_ids].reset_index()
                 upd = upd.rename(columns={
                     "Shipper":"VendorClean",
                     "Where":"Location",
                     "price":"Price",
-                    "Size":"volume_standard",   # << reflejar en day_df
+                    "Size":"size_text",   # <-- reflejar size_text
                 })
                 for _, r in upd.iterrows():
                     mask = day_df["id"] == r["id"]
-                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit","volume_standard"]:
+                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit","size_text"]:
                         if col in r and pd.notna(r[col]):
                             day_df.loc[mask, col] = r[col]
 
