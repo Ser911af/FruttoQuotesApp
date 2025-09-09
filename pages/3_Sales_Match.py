@@ -1,17 +1,14 @@
+# pages/0_Explorer.py
 import streamlit as st
-from auth_simple import ensure_auth, current_user, logout_button
+from simple_auth import ensure_login, current_user, logout_button
 
-st.set_page_config(page_title="Explorer", layout="wide")
+st.set_page_config(page_title="Explorer", page_icon="🔎", layout="wide")
+st.title("🔎 Explorer")
 
-# Guard de sesión (sin login aquí)
-if not ensure_auth():
-    st.error("No has iniciado sesión. Ve a la página Home para ingresar.")
-    st.stop()
+user = ensure_login()  # corta la ejecución si no hay login
 
-# (Opcional) botón de logout también aquí
-logout_button(location="sidebar")
+st.success(f"Bienvenido, {user}")
+st.write("Contenido de prueba de Explorer…")
 
-username, name, role = current_user()
-
-# ... resto de tu lógica (filtros, tablas, gráficos) ...
-
+# Botón de logout opcional aquí también
+logout_button()
