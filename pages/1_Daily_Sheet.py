@@ -13,7 +13,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Versión visible para confirmar despliegue ----
-VERSION = "Daily_Sheet v2025-09-05 - Size desde size_text (fallback volume_standard)"
+VERSION = "Daily_Sheet v2025-09-09 - credenciales por secciones (supabase_quotes) + Volume"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -33,12 +33,15 @@ def _size_from_product(p: str) -> str:
     return m.group(1) if m else ""
 
 def _choose_size(row) -> str:
+    # 1) Prioriza size_text (talla/grade original)
     stxt = row.get("size_text")
     if isinstance(stxt, str) and stxt.strip():
         return stxt.strip()
+    # 2) Fallback legacy: volume_standard
     vs = row.get("volume_standard")
     if isinstance(vs, str) and vs.strip():
         return vs.strip()
+    # 3) Último recurso: inferir desde Product
     return _size_from_product(row.get("Product", ""))
 
 def _ogcv(x) -> str:
@@ -85,54 +88,72 @@ def _norm_name(x: str) -> str:
     return s[:1].upper() + s[1:].lower() if s else s
 
 # ------------------------
-# Credenciales Supabase (nuevo formato)
+# Supabase helpers (por secciones)
 # ------------------------
-def _get_supabase_block(block: str = "supabase_quotes"):
-    blk = st.secrets.get(block, {})
-    url = blk.get("url")
-    key = blk.get("anon_key")
-    table = blk.get("table", "quotations")
-    schema = blk.get("schema", "public")
-    return url, key, schema, table
+def _read_section(section_name: str) -> dict:
+    """
+    Lee una sección de st.secrets (p.ej. 'supabase_quotes') y valida claves mínimas.
+    Espera:
+      url, anon_key, table (def: quotations), schema (def: public)
+    """
+    try:
+        sec = st.secrets[section_name]
+    except Exception:
+        raise KeyError(f"No encontré la sección '{section_name}' en st.secrets.")
+    for k in ("url", "anon_key"):
+        if k not in sec or not str(sec[k]).strip():
+            raise KeyError(f"'{k}' ausente o vacío en st.secrets['{section_name}'].")
+    sec = dict(sec)
+    sec["table"] = sec.get("table", "").strip() or "quotations"
+    sec["schema"] = sec.get("schema", "").strip() or "public"
+    return sec
 
-# ------------------------
-# Data fetch (Supabase)
-# ------------------------
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_quotations_from_supabase():
+def _create_client(url: str, key: str):
     try:
         from supabase import create_client
     except Exception as e:
-        st.error(f"Falta 'supabase' en requirements.txt: {e}")
-        return pd.DataFrame()
+        raise ImportError(f"Falta 'supabase' en requirements.txt: {e}")
+    return create_client(url, key)
 
-    url, key, schema, table = _get_supabase_block("supabase_quotes")
-    if not url or not key:
-        st.error("No encontré credenciales en [supabase_quotes].")
-        return pd.DataFrame()
+def _sb_table(sb, schema: str, table: str):
+    """Devuelve un handle a la tabla respetando el schema si el cliente lo soporta."""
+    try:
+        return sb.schema(schema).table(table)  # supabase-py v2+
+    except Exception:
+        return sb.table(table)                 # fallback v1
 
-    sb = create_client(url, key)
+# ------------------------
+# Data fetch (Supabase - usa sección supabase_quotes)
+# ------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_all_quotations_from_supabase():
+    """Trae quotations paginado desde la sección [supabase_quotes]."""
+    try:
+        cfg = _read_section("supabase_quotes")
+        sb = _create_client(cfg["url"], cfg["anon_key"])
+        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
+    except Exception as e:
+        st.error(f"Config/cliente Supabase inválido: {e}")
+        return pd.DataFrame()
 
     frames, page_size = [], 1000
     for i in range(1000):
         start, end = i * page_size, i * page_size + page_size - 1
         try:
             resp = (
-                sb.schema(schema)
-                  .table(table)
-                  .select(
-                      "id,cotization_date,organic,product,price,location,"
-                      "volume_num,volume_unit,volume_standard,vendorclean,"
-                      "size_text"
-                  )
-                  .range(start, end)
-                  .execute()
+                tbl.select(
+                    "id,cotization_date,organic,product,price,location,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "size_text"
+                )
+                .range(start, end)
+                .execute()
             )
         except Exception as e:
             st.error(f"Error consultando Supabase: {e}")
             return pd.DataFrame()
 
-        rows = resp.data or []
+        rows = getattr(resp, "data", None) or []
         if not rows:
             break
         frames.append(pd.DataFrame(rows))
@@ -143,13 +164,18 @@ def fetch_all_quotations_from_supabase():
     if df.empty:
         return df
 
+    # Normalización mínima
     df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
     df["volume_unit"] = df["volume_unit"].astype(str).fillna("unit")
     if "size_text" not in df.columns:
         df["size_text"] = pd.NA
-    df = df.rename(columns={"product":"Product","location":"Location","vendorclean":"VendorClean"})
+    df = df.rename(columns={
+        "product":"Product",
+        "location":"Location",
+        "vendorclean":"VendorClean"
+    })
     return df
 
 # ------------------------
@@ -157,6 +183,7 @@ def fetch_all_quotations_from_supabase():
 # ------------------------
 st.title("Daily Sheet")
 
+# Logo centrado + utilidades
 colA, colB, colC = st.columns([1, 2, 1])
 with colB:
     if os.path.exists(LOGO_PATH):
@@ -201,30 +228,22 @@ if day_df.empty:
 day_df["Shipper"] = day_df["VendorClean"]
 day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
 day_df["Where"]   = day_df["Location"]
-day_df["Size"]    = day_df.apply(_choose_size, axis=1)  # Size desde size_text; fallback volume_standard -> heurística
-day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
+day_df["Size"]    = day_df.apply(_choose_size, axis=1)
+day_df["Volume"]  = day_df.apply(_volume_str, axis=1)   # ← Nombre final sin '?'
 day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
 # ---------- Filtros de la vista del día ----------
 cols = st.columns(4)
-
-# 1) Productos disponibles
 with cols[0]:
     product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_products = st.multiselect("Productos (disponibles)", options=product_options, default=product_options)
-
-# 2) Ubicaciones
 with cols[1]:
     locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_locs = st.multiselect("Ubicaciones", options=locs, default=locs)
-
-# 3) Búsqueda por texto en Product
 with cols[2]:
     search = st.text_input("Buscar producto (contiene)", "")
-
-# 4) Orden
 with cols[3]:
     sort_opt = st.selectbox("Ordenar por", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
 
@@ -254,17 +273,15 @@ edit_mode = st.toggle(
 )
 
 if edit_mode:
-    # Columnas exactas de BD y derivadas necesarias para edición
     edit_df = day_df[[
         "id", "cotization_date", "VendorClean", "Location", "Product",
         "size_text", "Organic", "Price", "volume_num", "volume_unit"
     ]].copy()
 
-    # Renombramos para la UI
     edit_df = edit_df.rename(columns={
         "VendorClean": "Shipper",
         "Location": "Where",
-        "size_text": "Size",   # UI expone "Size" y lo guarda en size_text
+        "size_text": "Size",     # UI muestra "Size" pero se guarda en size_text
         "Organic": "organic",
         "Price": "price",
     })
@@ -275,7 +292,7 @@ if edit_mode:
         "Shipper": st.column_config.TextColumn("Shipper"),
         "Where": st.column_config.TextColumn("Where"),
         "Product": st.column_config.TextColumn("Product"),
-        "Size": st.column_config.TextColumn("Size (size_text)"),  # editable -> size_text
+        "Size": st.column_config.TextColumn("Size (size_text)"),
         "organic": st.column_config.NumberColumn("OG/CV (1=OG,0=CV)", min_value=0, max_value=1, step=1),
         "price": st.column_config.NumberColumn("Price", min_value=0.0, step=0.01),
         "volume_num": st.column_config.NumberColumn("Volume Qty", min_value=0.0, step=0.01),
@@ -293,7 +310,6 @@ if edit_mode:
     )
 
     if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
-        # 1) Detectar diferencias (usando alias de UI)
         ORIG = edit_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
         NEW  = edited_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
 
@@ -303,12 +319,11 @@ if edit_mode:
         if not dirty_ids:
             st.success("No hay cambios por guardar.")
         else:
-            # 2) Construir payload con nombres EXACTOS de BD (minúsculas)
             payload = []
             for _id in dirty_ids:
                 ui_row = NEW.loc[_id].to_dict()
 
-                # Normalizar tipos
+                # Tipos
                 for k in ["price", "volume_num"]:
                     v = ui_row.get(k)
                     try:
@@ -321,12 +336,12 @@ if edit_mode:
                 except Exception:
                     pass
 
-                # Mapeo UI -> BD (guardamos Size en size_text)
+                # UI -> BD
                 db_row = {
                     "vendorclean": ui_row.get("Shipper"),
                     "location": ui_row.get("Where"),
                     "product": ui_row.get("Product"),
-                    "size_text": ui_row.get("Size"),      # <-- guardar talla en size_text
+                    "size_text": ui_row.get("Size"),
                     "organic": ui_row.get("organic"),
                     "price": ui_row.get("price"),
                     "volume_num": ui_row.get("volume_num"),
@@ -337,27 +352,25 @@ if edit_mode:
                     continue
                 payload.append({"id": _id, **clean_db_row})
 
-            # 3) Ejecutar updates por id (BD usa minúsculas)
             try:
-                from supabase import create_client
-                SUPABASE_URL = st.secrets["SUPABASE_URL"]
-                SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
-                sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+                cfg = _read_section("supabase_quotes")
+                sb = _create_client(cfg["url"], cfg["anon_key"])
+                tbl = _sb_table(sb, cfg["schema"], cfg["table"])
 
                 for item in payload:
                     _id = item.pop("id")
-                    sb.table("quotations").update(item).eq("id", _id).execute()
+                    tbl.update(item).eq("id", _id).execute()
 
                 st.success(f"Se actualizaron {len(payload)} registro(s). 🎉")
                 st.balloons()
 
-                # 4) Refrescar day_df: actualizar columnas renombradas/derivadas
+                # Refrescar day_df local
                 upd = NEW.loc[dirty_ids].reset_index()
                 upd = upd.rename(columns={
                     "Shipper":"VendorClean",
                     "Where":"Location",
                     "price":"Price",
-                    "Size":"size_text",   # <-- reflejar size_text
+                    "Size":"size_text",
                 })
                 for _, r in upd.iterrows():
                     mask = day_df["id"] == r["id"]
@@ -370,12 +383,13 @@ if edit_mode:
                 day_df["Where"]   = day_df["Location"]
                 day_df["Price$"]  = day_df["Price"].apply(_format_price)
                 day_df["Size"]    = day_df.apply(_choose_size, axis=1)
+                day_df["Volume"]  = day_df.apply(_volume_str, axis=1)
 
             except Exception as e:
                 st.error(f"Error al guardar cambios: {e}")
 
 # ---------- Vista de la tabla (solo lectura bonita) ----------
-show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume?","Price$", "Family"]].reset_index(drop=True)
+show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume","Price$", "Family"]].reset_index(drop=True)
 st.dataframe(show, use_container_width=True)
 
 # Descarga CSV con fecha formateada
@@ -400,7 +414,6 @@ else:
     if viz_day.empty:
         st.info("No hay datos en la tabla actual para graficar.")
     else:
-        # Normalizaciones para graficar
         viz_day["price_num"] = pd.to_numeric(viz_day["Price"], errors="coerce")
         viz_day["volume_num"] = pd.to_numeric(viz_day["volume_num"], errors="coerce")
         viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
@@ -481,7 +494,7 @@ else:
 
         # ---- 6) Tabla de extremos ----
         with st.expander("🔎 Ver extremos de precio (tabla visible)"):
-            tmp = viz_day[["Product","Shipper","Where","price_num","Volume?"]].dropna(subset=["price_num"]).copy()
+            tmp = viz_day[["Product","Shipper","Where","price_num","Volume"]].dropna(subset=["price_num"]).copy()
             tmp = tmp.sort_values("price_num")
             c1, c2 = st.columns(2)
             with c1:
