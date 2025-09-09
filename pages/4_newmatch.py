@@ -516,7 +516,7 @@ with st.expander("Compras recientes por cliente/producto y recomendaciones (usan
     if not customers:
         st.info("No recent sales in the selected window.")
     else:
-        sel_customers = st.multiselect("Customers", customers, default=customers[: min(10, len(customers))], key="customers_recent")
+        sel_customers = st.multiselect("Customers", customers, default=customers[: min(10, len(customers))], key="customers_main")
         subset_recent = sdf_recent_cust[sdf_recent_cust["customer_c"].isin(sel_customers)].copy()
         st.write("**Recent sales (aggregated by quantity):**")
         st.dataframe(subset_recent.rename(columns={
@@ -553,7 +553,7 @@ with st.expander("View recent sales aggregated by customer/product", expanded=Fa
         st.info("No recent sales in the selected window.")
     else:
         customers = sorted(sdf_recent_cust["customer_c"].dropna().unique().tolist())
-        sel_customers = st.multiselect("Customers", customers, default=customers[: min(10, len(customers))], key="customers_recent")
+        sel_customers = st.multiselect("Customers", customers, default=customers[: min(10, len(customers))], key="customers_expander")
         subset_recent = sdf_recent_cust[sdf_recent_cust["customer_c"].isin(sel_customers)].copy()
         st.dataframe(subset_recent.rename(columns={
             "customer_c": "customer", "product_canon": "product", "is_organic": "organic",
