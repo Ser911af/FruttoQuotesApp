@@ -202,7 +202,7 @@ day_df["Shipper"] = day_df["VendorClean"]
 day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
 day_df["Where"]   = day_df["Location"]
 day_df["Size"]    = day_df.apply(_choose_size, axis=1)  # Size desde size_text; fallback volume_standard -> heurística
-day_df["Volume"] = day_df.apply(_volume_str, axis=1)
+day_df["Volume?"] = day_df.apply(_volume_str, axis=1)
 day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
