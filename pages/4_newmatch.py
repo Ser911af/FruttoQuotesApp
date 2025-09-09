@@ -24,8 +24,8 @@ except Exception:
 # CONFIG & PAGE
 # ------------------------
 st.set_page_config(page_title="Sales Match — Vendor Recommender", page_icon="🧩", layout="wide")
-st.title("🧩 Sales Match: Recomendador de Clientes")
-st.caption("Compara lo que los *clientes* compraron recientemente con las cotizaciones del **Daily Sheet del día** para decidir qué ofrecerles hoy.")
+st.title("🧩 Sales Match: Customer Offer Recommender")
+st.caption("Compare what *customers* bought recently (sales) with **today's quotations** to decide what to offer them now.")
 
 # ------------------------
 # HELPERS: Secrets & Normalización
@@ -462,14 +462,14 @@ def build_customer_offers(qdf_day: pd.DataFrame, sales_recent: pd.DataFrame, sal
 # ------------------------
 with st.sidebar:
     st.subheader("Filtros")
-    days = st.slider("Ventana de días (ventas recientes)", min_value=3, max_value=60, value=14, step=1)
-    topk = st.slider("Top-K recomendaciones", min_value=3, max_value=20, value=5, step=1)
+    days = st.slider("Sales lookback window (days)", min_value=3, max_value=60, value=14, step=1, key="win_days")
+    topk = st.slider("Top-K offers per customer/product", min_value=3, max_value=20, value=5, step=1, key="topk_recs")
 
     st.markdown("---")
     # Fecha del Daily Sheet (por defecto, hoy Bogotá)
     default_day = _bogota_today()
-    selected_day = st.date_input("Fecha del Daily Sheet", value=default_day)
-    only_matches = st.checkbox("Mostrar SOLO vendors con match (han vendido en la ventana)", value=True)
+    selected_day = st.date_input("Quotations date", value=default_day, key="ds_day")
+    only_matches = st.checkbox("Show ONLY vendors with recent sales match", value=True, key="only_matches_chk")
 
 # ------------------------
 # DATA PIPELINE
@@ -479,9 +479,9 @@ sdf = load_sales()
 
 col1, col2 = st.columns(2)
 with col1:
-    st.metric("Cotizaciones cargadas", value=len(qdf_all))
+    st.metric("Quotations loaded", value=len(qdf_all))
 with col2:
-    st.metric("Registros de ventas", value=len(sdf))
+    st.metric("Sales records", value=len(sdf))
 
 if qdf_all.empty or sdf.empty:
     st.stop()
@@ -496,13 +496,13 @@ sdf_recent_cust = recent_purchases(sdf, days_window=days)
 customers = sorted(sdf_recent_cust["customer_c"].dropna().unique().tolist())
 
 # 3) Ofertas del día por cliente (usando SOLO Daily Sheet del día)
-st.subheader("Ofertas del día por cliente")
+st.subheader("Customer offers for the selected day (from quotations)")
 if qdf_day.empty or sdf_recent_cust.empty:
-    st.info("Carga cotizaciones del día y asegúrate de tener ventas recientes en la ventana.")
+    st.info("Load quotations for the selected day and make sure you have recent sales within the window.")
 else:
     offers = build_customer_offers(qdf_day, sdf_recent_cust, sdf, bench_days=30, top_k=topk)
     if offers.empty:
-        st.warning("No hay ofertas relevantes para los clientes en esta ventana con el Daily Sheet del día.")
+        st.warning("No relevant offers for customers in this window using today's quotations.")
     else:
         st.dataframe(offers)
 
@@ -514,11 +514,11 @@ customers = sorted(sdf_recent_cust["customer_c"].dropna().unique().tolist())
 
 with st.expander("Compras recientes por cliente/producto y recomendaciones (usando Daily Sheet del día)", expanded=False):
     if not customers:
-        st.info("No hay compras recientes en la ventana seleccionada.")
+        st.info("No recent sales in the selected window.")
     else:
-        sel_customers = st.multiselect("Clientes", customers, default=customers[: min(10, len(customers))])
+        sel_customers = st.multiselect("Customers", customers, default=customers[: min(10, len(customers))], key="customers_recent")
         subset_recent = sdf_recent_cust[sdf_recent_cust["customer_c"].isin(sel_customers)].copy()
-        st.write("**Compras recientes (agregado por cantidad):**")
+        st.write("**Recent sales (aggregated by quantity):**")
         st.dataframe(subset_recent.rename(columns={
             "customer_c": "customer", "product_canon": "product", "is_organic": "organic",
             "size_std": "size", "loc_c": "location", "quantity": "qty"
@@ -547,13 +547,13 @@ with st.expander("Compras recientes por cliente/producto y recomendaciones (usan
 # ------------------------
 # (Opcional) Vista de compras recientes
 # ------------------------
-with st.expander("Ver compras recientes agregadas por cliente/producto", expanded=False):
+with st.expander("View recent sales aggregated by customer/product", expanded=False):
     sdf_recent_cust = recent_purchases(sdf, days_window=days)
     if sdf_recent_cust.empty:
-        st.info("No hay compras recientes en la ventana seleccionada.")
+        st.info("No recent sales in the selected window.")
     else:
         customers = sorted(sdf_recent_cust["customer_c"].dropna().unique().tolist())
-        sel_customers = st.multiselect("Clientes", customers, default=customers[: min(10, len(customers))])
+        sel_customers = st.multiselect("Customers", customers, default=customers[: min(10, len(customers))], key="customers_recent")
         subset_recent = sdf_recent_cust[sdf_recent_cust["customer_c"].isin(sel_customers)].copy()
         st.dataframe(subset_recent.rename(columns={
             "customer_c": "customer", "product_canon": "product", "is_organic": "organic",
