@@ -3,7 +3,7 @@ from auth_simple import ensure_auth, do_login_ui, current_user, logout_button
 
 st.set_page_config(page_title="AppFruttoQuotations", layout="wide")
 
-# Si no hay sesión, muestra el form de login aquí (no en otras páginas)
+# Si no hay sesión, mostramos el login AQUÍ (único lugar)
 if not ensure_auth():
     do_login_ui(location="main")
     st.stop()
