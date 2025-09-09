@@ -1,65 +1,114 @@
 # auth_simple.py
-import time
 import streamlit as st
 import bcrypt
 
-SESSION_KEYS = {
-    "auth": "is_auth",
-    "user": "auth_user",
-    "name": "auth_name",
-    "role": "auth_role",
-    "ts":   "auth_ts",
-}
+USERS_PATH = ("basic_auth", "users")  # ruta en secrets
 
-def _find_user(username: str):
-    for u in st.secrets["users"]["list"]:
-        if u["username"] == username:
-            return u
-    return None
+def _load_users():
+    """
+    Devuelve un dict {username: {name, roles, password_hash}}
+    Valida estructura y da errores claros en UI.
+    """
+    try:
+        basic_auth = st.secrets.get(USERS_PATH[0], {})
+        users = basic_auth.get(USERS_PATH[1], {})
+        if not isinstance(users, dict) or not users:
+            st.error("No hay usuarios definidos en [basic_auth.users] de secrets.toml.")
+            return {}
+        # Normaliza usernames a minúsculas
+        norm = {}
+        for uname, data in users.items():
+            if not isinstance(data, dict):
+                st.error(f"Entrada de usuario inválida para '{uname}'; debe ser objeto con password_hash.")
+                continue
+            ukey = (uname or "").strip().lower()
+            if not ukey:
+                st.error("Se encontró un usuario sin nombre (clave vacía) en [basic_auth.users].")
+                continue
+            if "password_hash" not in data:
+                st.error(f"Usuario '{uname}' sin 'password_hash' en secrets.")
+                continue
+            norm[ukey] = {
+                "name": data.get("name") or uname,
+                "roles": data.get("roles", []),
+                "password_hash": str(data["password_hash"]),
+                "username": ukey,
+            }
+        return norm
+    except Exception as e:
+        st.error(f"Error leyendo secrets: {e}")
+        return {}
 
-def verify_credentials(username: str, password: str) -> tuple[bool, dict | None]:
-    user = _find_user(username)
-    if not user:
+def verify_credentials(username: str, password: str):
+    """
+    Retorna (ok: bool, user: dict|None)
+    Maneja usuario no encontrado y hash ausente sin lanzar KeyError.
+    """
+    users = _load_users()
+    if not users:
         return False, None
-    ok = bcrypt.checkpw(password.encode(), user["password_hash"].encode())
+
+    uname = (username or "").strip().lower()
+    if uname not in users:
+        return False, None
+
+    user = users[uname]
+    ph = user.get("password_hash")
+    if not ph:
+        # Estructura inválida → mejor mensaje claro
+        st.error(f"El usuario '{uname}' no tiene 'password_hash' en secrets.")
+        return False, None
+
+    try:
+        ok = bcrypt.checkpw((password or "").encode(), ph.encode())
+    except Exception as e:
+        st.error(f"Error validando contraseña: {e}")
+        return False, None
+
     return ok, user if ok else (False, None)
 
-def do_login_ui(location: str = "main"):
-    # Renderiza el formulario de login (solo en Home)
-    container = st.sidebar if location == "sidebar" else st
-    with container.form(key=f"login_form_{location}", clear_on_submit=False):
-        st.subheader("Login")
-        username = st.text_input("Usuario", value="", key=f"u_{location}")
-        password = st.text_input("Contraseña", type="password", value="", key=f"p_{location}")
-        submit   = st.form_submit_button("Entrar")
+def do_login_ui(location: str = "main", key_prefix: str = "auth"):
+    """
+    Renderiza el formulario de login simple. Si éxito, guarda user en session_state.
+    """
+    container = st if location == "main" else st.sidebar
 
-    if submit:
-        ok, user = verify_credentials(username.strip(), password)
-        if ok:
-            st.session_state[SESSION_KEYS["auth"]] = True
-            st.session_state[SESSION_KEYS["user"]] = user["username"]
-            st.session_state[SESSION_KEYS["name"]] = user.get("name", user["username"])
-            st.session_state[SESSION_KEYS["role"]] = user.get("role", "viewer")
-            st.session_state[SESSION_KEYS["ts"]]   = int(time.time())
-            st.success(f"Bienvenido, {st.session_state[SESSION_KEYS['name']]}")
-            st.rerun()  # refresca la página ya autenticada
-        else:
-            st.error("Usuario o contraseña incorrectos.")
+    # Si ya hay sesión activa, muestra perfil y botón logout
+    if st.session_state.get(f"{key_prefix}_user"):
+        u = st.session_state[f"{key_prefix}_user"]
+        with container.expander("Sesión activa", expanded=False):
+            container.write({
+                "username": u.get("username"),
+                "name": u.get("name"),
+                "roles": u.get("roles", []),
+            })
+        if container.button("Cerrar sesión", key=f"{key_prefix}_logout"):
+            st.session_state.pop(f"{key_prefix}_user", None)
+            st.rerun()
+        return
 
-def ensure_auth() -> bool:
-    return bool(st.session_state.get(SESSION_KEYS["auth"], False))
+    with container.form(key=f"{key_prefix}_form", clear_on_submit=False):
+        username = container.text_input("Usuario", key=f"{key_prefix}_uname")
+        password = container.text_input("Contraseña", type="password", key=f"{key_prefix}_pwd")
+        submitted = container.form_submit_button("Iniciar sesión")
+        if submitted:
+            ok, user = verify_credentials(username.strip(), password)
+            if ok and user:
+                st.session_state[f"{key_prefix}_user"] = user
+                st.success(f"¡Bienvenido, {user.get('name', user['username'])}!")
+                st.experimental_rerun()  # refresca la UI como logueado
+            else:
+                st.error("Usuario o contraseña incorrectos.")
 
-def current_user() -> tuple[str | None, str | None, str | None]:
-    return (
-        st.session_state.get(SESSION_KEYS["user"]),
-        st.session_state.get(SESSION_KEYS["name"]),
-        st.session_state.get(SESSION_KEYS["role"]),
-    )
-
-def logout_button(location: str = "sidebar"):
-    container = st.sidebar if location == "sidebar" else st
-    if container.button("Cerrar sesión", key=f"logout_{location}"):
-        for k in SESSION_KEYS.values():
-            st.session_state.pop(k, None)
-        st.success("Sesión cerrada.")
-        st.rerun()
+def require_roles(roles: set[str], key_prefix: str = "auth") -> bool:
+    """
+    Retorna True si el usuario autenticado tiene alguno de los roles; False si no.
+    Si no hay usuario, retorna False.
+    """
+    u = st.session_state.get(f"{key_prefix}_user")
+    if not u:
+        return False
+    if not roles:
+        return True
+    user_roles = set(u.get("roles", []))
+    return bool(user_roles.intersection(roles))
