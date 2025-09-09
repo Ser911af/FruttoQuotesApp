@@ -28,6 +28,41 @@ with st.sidebar:
 LOGO_PATH   = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"
 
+def _load_supabase_creds():
+    """
+    Prioridad:
+      1) st.secrets['supabase_quotes'] -> url / anon_key / table
+      2) st.secrets SUPABASE_URL / SUPABASE_ANON_KEY (planos)
+      3) Variables de entorno SUPABASE_URL / SUPABASE_ANON_KEY
+    """
+    url = None
+    key = None
+    table = "quotations"
+
+    # 1) Namespace recomendado
+    sq = st.secrets.get("supabase_quotes", {})
+    if isinstance(sq, dict):
+        url = sq.get("url") or url
+        key = sq.get("anon_key") or sq.get("key") or key
+        table = sq.get("table") or table
+
+    # 2) Claves planas en secrets
+    if not url:
+        url = st.secrets.get("SUPABASE_URL", None)
+    if not key:
+        key = st.secrets.get("SUPABASE_ANON_KEY", None) or st.secrets.get("SUPABASE_KEY", None)
+
+    # 3) Fallback a entorno
+    if not url:
+        url = os.getenv("SUPABASE_URL")
+    if not key:
+        key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+
+    if not url or not key:
+        raise RuntimeError("No encontré credenciales de Supabase. Define 'supabase_quotes' en secrets o las claves planas.")
+
+    return url, key, table
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_quotations_from_supabase():
     """Trae quotations paginado; ante errores devuelve DF vacío (no rompe UI)."""
@@ -37,13 +72,14 @@ def fetch_all_quotations_from_supabase():
         st.error(f"Falta 'supabase' en requirements: {e}")
         return pd.DataFrame()
 
+    # Cargar credenciales (namespace + fallbacks)
     try:
-        SUPABASE_URL = st.secrets["SUPABASE_URL"]
-        SUPABASE_KEY = st.secrets["SUPABASE_ANON_KEY"]
-    except Exception:
-        st.error("No encontré SUPABASE_URL / SUPABASE_ANON_KEY en secrets.")
+        SUPABASE_URL, SUPABASE_KEY, TABLE = _load_supabase_creds()
+    except Exception as e:
+        st.error(str(e))
         return pd.DataFrame()
 
+    # ⚠️ Recomendación: usa SIEMPRE anon_key + RLS activas.
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     frames, page_size = [], 1000
@@ -51,7 +87,7 @@ def fetch_all_quotations_from_supabase():
         start, end = i*page_size, i*page_size + page_size - 1
         try:
             resp = (
-                sb.table("quotations")
+                sb.table(TABLE)
                   .select(
                       "cotization_date,organic,product,price,location,"
                       "volume_num,volume_unit,volume_standard,vendorclean"
