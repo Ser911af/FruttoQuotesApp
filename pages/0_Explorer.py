@@ -29,86 +29,104 @@ LOGO_PATH   = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"
 
 # ------------------------
-# Credenciales Supabase (nueva estructura)
+# Credenciales Supabase (nueva estructura por secciones)
 # ------------------------
-def _load_supabase_creds(block: str = "supabase_quotes"):
+def _read_section(section_name: str = "supabase_quotes") -> dict:
     """
-    Carga credenciales de Supabase desde secrets.
-    Prioridad:
-      1) st.secrets['supabase_quotes'] -> url / anon_key / table / schema
-      2) st.secrets SUPABASE_URL / SUPABASE_ANON_KEY (planos)
-      3) Variables de entorno SUPABASE_URL / SUPABASE_ANON_KEY
+    Lee una sección de st.secrets (p.ej. 'supabase_quotes') y valida claves mínimas.
+    Estructura esperada:
+      [supabase_quotes]
+      url = "https://xxx.supabase.co"
+      anon_key = "eyJ..."
+      table = "quotations"
+      schema = "public"
+    Fallbacks:
+      - SUPABASE_URL / SUPABASE_ANON_KEY en secrets o entorno.
     """
-    url = None
-    key = None
-    table = "quotations"
-    schema = "public"
+    sec = {}
+    # 1) Sección recomendada
+    try:
+        block = st.secrets.get(section_name, {})
+        if isinstance(block, dict):
+            sec.update(block)
+    except Exception:
+        pass
 
-    # 1) Namespace recomendado en secrets
-    sb_block = st.secrets.get(block, {})
-    if isinstance(sb_block, dict):
-        url = sb_block.get("url") or url
-        key = sb_block.get("anon_key") or sb_block.get("key") or key
-        table = sb_block.get("table") or table
-        schema = sb_block.get("schema") or schema
+    # 2) Fallback claves planas en secrets
+    if not sec.get("url"):
+        u = st.secrets.get("SUPABASE_URL", None)
+        if u: sec["url"] = u
+    if not sec.get("anon_key"):
+        k = st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY", None))
+        if k: sec["anon_key"] = k
 
-    # 2) Claves planas en secrets
-    if not url:
-        url = st.secrets.get("SUPABASE_URL")
-    if not key:
-        key = st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY")
+    # 3) Fallback variables de entorno
+    if not sec.get("url"):
+        u = os.getenv("SUPABASE_URL")
+        if u: sec["url"] = u
+    if not sec.get("anon_key"):
+        k = os.getenv("SUPABASE_ANON_KEY", os.getenv("SUPABASE_KEY"))
+        if k: sec["anon_key"] = k
 
-    # 3) Fallback a entorno
-    if not url:
-        url = os.getenv("SUPABASE_URL")
-    if not key:
-        key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+    # Defaults de tabla y schema
+    sec["table"]  = (sec.get("table") or "quotations").strip()
+    sec["schema"] = (sec.get("schema") or "public").strip()
 
-    if not url or not key:
-        raise RuntimeError("No encontré credenciales de Supabase. Define 'supabase_quotes' en secrets o las claves planas.")
+    if not sec.get("url") or not sec.get("anon_key"):
+        raise RuntimeError(
+            "No encontré credenciales de Supabase. "
+            "Define la sección '[supabase_quotes]' en secrets, o SUPABASE_URL / SUPABASE_ANON_KEY."
+        )
+    return sec
 
-    return url, key, schema, table
+def _create_client(url: str, key: str):
+    try:
+        from supabase import create_client
+    except Exception as e:
+        raise ImportError(f"Falta 'supabase' en requirements: {e}")
+    return create_client(url, key)
+
+def _sb_table(sb, schema: str, table: str):
+    """
+    Devuelve un handle a la tabla respetando el schema si tu cliente lo soporta.
+    """
+    try:
+        return sb.schema(schema).table(table)  # supabase-py v2+
+    except Exception:
+        return sb.table(table)                 # fallback v1
 
 # ------------------------
 # Fetch quotations
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_quotations_from_supabase():
+def fetch_all_quotations_from_supabase(section_name: str = "supabase_quotes"):
     """Trae quotations paginado; ante errores devuelve DF vacío (no rompe UI)."""
+    # Cargar credenciales (por sección)
     try:
-        from supabase import create_client
-    except Exception as e:
-        st.error(f"Falta 'supabase' en requirements: {e}")
-        return pd.DataFrame()
-
-    # Cargar credenciales
-    try:
-        SUPABASE_URL, SUPABASE_KEY, SCHEMA, TABLE = _load_supabase_creds("supabase_quotes")
+        cfg = _read_section(section_name)
+        sb = _create_client(cfg["url"], cfg["anon_key"])
+        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
     except Exception as e:
         st.error(str(e))
         return pd.DataFrame()
-
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     frames, page_size = [], 1000
     for i in range(1000):
         start, end = i*page_size, i*page_size + page_size - 1
         try:
             resp = (
-                sb.schema(SCHEMA)
-                  .table(TABLE)
-                  .select(
-                      "cotization_date,organic,product,price,location,"
-                      "volume_num,volume_unit,volume_standard,vendorclean"
-                  )
-                  .range(start, end)
-                  .execute()
+                tbl.select(
+                    "cotization_date,organic,product,price,location,"
+                    "volume_num,volume_unit,volume_standard,vendorclean"
+                )
+                .range(start, end)
+                .execute()
             )
         except Exception as e:
             st.error(f"Error consultando Supabase: {e}")
             return pd.DataFrame()
 
-        rows = resp.data or []
+        rows = getattr(resp, "data", None) or []
         if not rows:
             break
         frames.append(pd.DataFrame(rows))
@@ -148,14 +166,14 @@ def fetch_all_quotations_from_supabase():
         "vendorclean":"VendorClean"
     })
 
-    # FIX: usar .str.upper()
+    # FIX: usar .str.upper() para filtrar filas con 'PAS'
     df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
 
     df = df.sort_values("cotization_date", ascending=False)
     return df
 
 # ---------- UI ----------
-df = fetch_all_quotations_from_supabase()
+df = fetch_all_quotations_from_supabase("supabase_quotes")
 
 col1, col2 = st.columns([3, 1])
 with col1:
