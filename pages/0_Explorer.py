@@ -1,17 +1,7 @@
-# pages/0_Explorer.py
-import os
-import pandas as pd
 import streamlit as st
-
-# Auth simple (asegúrate de tener simple_auth.py en la raíz del proyecto)
-from simple_auth import ensure_login, logout_button
-
-# Altair opcional (no rompe si no está instalado)
-try:
-    import altair as alt
-    ALTAIR_OK = True
-except Exception:
-    ALTAIR_OK = False
+import pandas as pd
+import os
+import altair as alt
 
 # ------------------------
 # FruttoFoods Explorer (Supabase)
@@ -19,35 +9,42 @@ except Exception:
 
 st.set_page_config(page_title="FruttoFoods Explorer", layout="wide")
 
-# ✅ Exigir login antes de cargar nada pesado
-user = ensure_login()   # detiene la página si no hay sesión
-# (Opcional) botón de salir aquí mismo
-with st.sidebar:
-    logout_button()
-
 LOGO_PATH   = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"
 
+def organic_to_num(val):
+    if val == 'Conventional': return 0
+    if val == 'Organic':     return 1
+    return None
+
 # ------------------------
-# Credenciales Supabase (nueva estructura)
+# Helpers de credenciales (nueva estructura)
 # ------------------------
 def _read_section(section_name: str = "supabase_quotes") -> dict:
     """
     Lee una sección de st.secrets (p.ej. 'supabase_quotes') y valida claves mínimas.
     Espera:
       url, anon_key, table (def: quotations), schema (def: public)
+    Hace fallback a SUPABASE_URL / SUPABASE_ANON_KEY y variables de entorno.
     """
     try:
         sec = st.secrets[section_name]
     except Exception:
-        # Compat con claves planas/entorno como fallback
         sec = {}
-    # Tomar url/key de la sección si existe
-    url = (sec.get("url") if isinstance(sec, dict) else None) or st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-    key = (sec.get("anon_key") if isinstance(sec, dict) else None) or st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+
+    url = (sec.get("url") if isinstance(sec, dict) else None) \
+          or st.secrets.get("SUPABASE_URL") \
+          or os.getenv("SUPABASE_URL")
+    key = (sec.get("anon_key") if isinstance(sec, dict) else None) \
+          or st.secrets.get("SUPABASE_ANON_KEY") \
+          or st.secrets.get("SUPABASE_KEY") \
+          or os.getenv("SUPABASE_ANON_KEY") \
+          or os.getenv("SUPABASE_KEY")
+
     if not url or not key:
         raise RuntimeError("No encontré credenciales de Supabase. Define [supabase_quotes] en secrets o usa SUPABASE_URL/SUPABASE_ANON_KEY.")
-    table = (sec.get("table") if isinstance(sec, dict) else None) or "quotations"
+
+    table  = (sec.get("table") if isinstance(sec, dict) else None) or "quotations"
     schema = (sec.get("schema") if isinstance(sec, dict) else None) or "public"
     return {"url": url, "key": key, "table": table, "schema": schema}
 
@@ -66,7 +63,7 @@ def _sb_table(sb, schema: str, table: str):
         return sb.table(table)                 # fallback v1
 
 # ------------------------
-# Fetch quotations
+# Fetch quotations (usa sección supabase_quotes)
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_quotations_from_supabase():
@@ -78,8 +75,9 @@ def fetch_all_quotations_from_supabase():
         st.error(str(e))
         return pd.DataFrame()
 
+    # Cliente y tabla
     try:
-        sb = _create_client(cfg["url"], cfg["key"])
+        sb  = _create_client(cfg["url"], cfg["key"])
         tbl = _sb_table(sb, cfg["schema"], cfg["table"])
     except Exception as e:
         st.error(f"Config/cliente Supabase inválido: {e}")
@@ -126,7 +124,6 @@ def fetch_all_quotations_from_supabase():
     df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
-
     df = df.dropna(subset=["Price"])
 
     vol_std = pd.to_numeric(df["volume_standard"], errors="coerce")
@@ -141,7 +138,7 @@ def fetch_all_quotations_from_supabase():
         "vendorclean":"VendorClean"
     })
 
-    # FIX: filtrar textos tipo "PAS" en Price
+    # Filtrar textos tipo "PAS" en Price
     df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
 
     df = df.sort_values("cotization_date", ascending=False)
@@ -153,7 +150,6 @@ df = fetch_all_quotations_from_supabase()
 col1, col2 = st.columns([3, 1])
 with col1:
     st.title("FruttoFoods Quotation Tool")
-    st.caption(f"Sesión: {user}")
 with col2:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=80)
@@ -231,7 +227,7 @@ else:
     st.subheader("Average Price/Unit by Vendor")
     if not g['VendorClean'].dropna().empty:
         avg_vendor = g.groupby('VendorClean', dropna=True)['price_per_unit'].mean().reset_index()
-        if not avg_vendor.empty and ALTAIR_OK:
+        if not avg_vendor.empty:
             chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
                 x=alt.X('VendorClean:N', title='Vendor', sort='-y'),
                 y=alt.Y('price_per_unit:Q', title='Avg Price/Unit')
@@ -239,8 +235,6 @@ else:
             st.altair_chart(chart, use_container_width=True)
             best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
             st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
-        elif not ALTAIR_OK:
-            st.info("Altair no está instalado; omitiendo gráfico.")
         else:
             st.info("No hay datos agregables por Vendor con los filtros actuales.")
     else:
