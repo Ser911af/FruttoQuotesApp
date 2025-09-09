@@ -1,17 +1,22 @@
 import streamlit as st
-from auth_helpers import login_and_require
 
-st.set_page_config(page_title="FruttoQuotes • Home", page_icon="🏠", layout="wide")
+st.set_page_config(page_title="Login simple", page_icon="🔐")
+st.title("Login simple")
 
-st.title("🏠 FruttoQuotes")
-st.caption("Prototipo con login simple (usuarios en secrets)")
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-# Requiere estar logueado (cualquier rol)
-user = login_and_require()
-
-st.success(f"Hola, {user['name']} · Rol: {user['role']}")
-
-st.subheader("Navegación rápida")
-st.page_link("pages/0_Explorer.py", label="🔎 Explorer")
-st.page_link("pages/1_Daily_Sheet.py", label="📊 Daily Sheet")
-st.page_link("pages/2_Upload_Quotes.py", label="📤 Upload Quotes")
+if st.session_state.user:
+    st.success(f"Hola {st.session_state.user}")
+    if st.button("Cerrar sesión"):
+        st.session_state.user = None
+        st.rerun()
+else:
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
+    if st.button("Iniciar sesión"):
+        if u in st.secrets["credentials"] and st.secrets["credentials"][u] == p:
+            st.session_state.user = u
+            st.rerun()
+        else:
+            st.error("Credenciales inválidas")
