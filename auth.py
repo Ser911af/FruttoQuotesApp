@@ -2,18 +2,18 @@ import streamlit as st
 import streamlit_authenticator as stauth
 
 def get_authenticator():
-    # Lee configuración desde secrets
+    # Lee configuración desde secrets.toml
     cookie_name = st.secrets["auth"]["cookie_name"]
     signature_key = st.secrets["auth"]["signature_key"]
     cookie_expiry_days = int(st.secrets["auth"]["cookie_expiry_days"])
 
-    # Construye el diccionario para Streamlit-Authenticator
+    # Construir dict de credenciales
     credentials = {"usernames": {}}
     for u in st.secrets["users"]["list"]:
         credentials["usernames"][u["username"]] = {
             "name": u["name"],
             "email": u.get("email", ""),
-            "password": u["password"],
+            "password": u["password"],   # hash bcrypt
             "role": u.get("role", "viewer"),
         }
 
@@ -25,15 +25,23 @@ def get_authenticator():
     )
     return authenticator
 
+
 def require_login(authenticator, location="main"):
     """
-    location: 'main' para forzar login en área principal; 'sidebar' para poner el formulario en el sidebar.
+    Muestra formulario de login.
+    location: 'main', 'sidebar' o 'unrendered'
     Retorna (name, auth_status, username).
     """
-    if location == "sidebar":
-        name, auth_status, username = authenticator.login("Login", "sidebar")
-    else:
-        name, auth_status, username = authenticator.login("Login", "main")
+    # ✅ Nuevo API: primero location
+    name, auth_status, username = authenticator.login(
+        location,
+        fields={
+            "Form name": "Login",
+            "Username": "Usuario",
+            "Password": "Contraseña",
+            "Login": "Entrar",
+        },
+    )
 
     if auth_status is False:
         st.error("Usuario/contraseña incorrectos.")
@@ -42,14 +50,17 @@ def require_login(authenticator, location="main"):
 
     return name, auth_status, username
 
+
 def current_role(username: str) -> str:
-    # Devuelve el rol del usuario actual
+    """Devuelve el rol asociado al usuario."""
     for u in st.secrets["users"]["list"]:
         if u["username"] == username:
             return u.get("role", "viewer")
     return "viewer"
 
+
 def logout_button(authenticator, location="sidebar"):
+    """Botón de logout."""
     if location == "sidebar":
         with st.sidebar:
             authenticator.logout("Cerrar sesión")
