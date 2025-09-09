@@ -24,8 +24,8 @@ except Exception:
 # CONFIG & PAGE
 # ------------------------
 st.set_page_config(page_title="Sales Match — Vendor Recommender", page_icon="🧩", layout="wide")
-st.title("🧩 Sales Match: Recomendador de Proveedores")
-st.caption("Cruza ventas recientes con cotizaciones del Daily Sheet para sugerir vendors y destacar quiénes ya nos vendieron.")
+st.title("🧩 Sales Match: Recomendador de Clientes")
+st.caption("Compara lo que los *clientes* compraron recientemente con las cotizaciones del **Daily Sheet del día** para decidir qué ofrecerles hoy.")
 
 # ------------------------
 # HELPERS: Secrets & Normalización
@@ -257,8 +257,8 @@ def recent_purchases(sales: pd.DataFrame, days_window: int) -> pd.DataFrame:
     sales["date"] = pd.to_datetime(sales["date"], errors="coerce")
     out = sales.loc[sales["date"] >= cutoff].copy()
     agg = (
-        out.groupby(["customer_c", "product_canon", "is_organic", "size_std", "loc_c"], dropna=False)[["quantity"]]
-        .sum()
+        out.groupby(["customer_c", "product_canon", "is_organic", "size_std", "loc_c"], dropna=False)[["quantity", "price_per_unit"]]
+        .agg(quantity=("quantity", "sum"), last_price=("price_per_unit", "last"))
         .reset_index()
     )
     return agg
@@ -378,6 +378,86 @@ def recent_vendor_stats(sales: pd.DataFrame, days_window: int) -> pd.DataFrame:
 
 
 # ------------------------
+# REGLAS DE PUNTAJE PARA OFERTAS A CLIENTES
+# ------------------------
+
+def score_offer(row_q, row_hist, bench_price: Optional[float]) -> Tuple[float, str]:
+    """Calcula score y 'por qué' para ofertar a un cliente: precio vs benchmark + match de tamaño/ubicación."""
+    why = []
+    score = 0.0
+    # Precio
+    if pd.notnull(bench_price) and bench_price > 0 and pd.notnull(row_q["price"]):
+        improvement = (bench_price - row_q["price"]) / bench_price
+        score += 1.2 * improvement  # peso fuerte por mejora de precio
+        if improvement > 0:
+            why.append(f"precio {improvement*100:.1f}% por debajo de su referencia")
+    # Ubicación / Tamaño / Orgánico
+    if row_q.get("loc_c", "") == row_hist.get("loc_c", ""):
+        score += 0.3
+        why.append("misma ubicación")
+    if row_q.get("size_std", "") and row_q.get("size_std", "") == row_hist.get("size_std", ""):
+        score += 0.2
+        why.append("mismo tamaño")
+    if bool(row_q.get("is_organic", False)) == bool(row_hist.get("is_organic", False)):
+        score += 0.2
+        why.append("misma condición OG/CV")
+    if not why:
+        why.append("coincide en commodity y condiciones básicas")
+    return score, ", ".join(why)
+
+
+def build_customer_offers(qdf_day: pd.DataFrame, sales_recent: pd.DataFrame, sales_all: pd.DataFrame, bench_days: int = 30, top_k: int = 5) -> pd.DataFrame:
+    """Para cada (cliente, producto) reciente, propone ofertas desde el Daily Sheet del día."""
+    if qdf_day.empty or sales_recent.empty:
+        return pd.DataFrame(columns=["customer","product","organic","size_hist","loc_hist","vendor","price","score","why"])    
+
+    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=bench_days)
+    s = sales_all.copy()
+    s["date"] = pd.to_datetime(s["date"], errors="coerce")
+    s = s.loc[s["date"] >= cutoff]
+    bench = (
+        s.groupby(["customer_c","product_canon","is_organic","size_std","loc_c"])['price_per_unit'].median().rename('bench_price').reset_index()
+    )
+
+    offers = []
+    for _, row in sales_recent.iterrows():
+        cust = row["customer_c"]
+        prod = row["product_canon"]
+        is_og = bool(row["is_organic"])
+        size_h = row.get("size_std", "")
+        loc_h = row.get("loc_c", "")
+        subset = qdf_day[(qdf_day["product_canon"] == prod) & (qdf_day["is_organic"] == is_og)].copy()
+        if subset.empty:
+            continue
+        b = bench[(bench["customer_c"]==cust) & (bench["product_canon"]==prod) & (bench["is_organic"]==is_og)]
+        if size_h:
+            b = b[b["size_std"]==size_h]
+        if loc_h:
+            b = b[b["loc_c"]==loc_h]
+        bench_price = b["bench_price"].iloc[0] if len(b)>0 else np.nan
+
+        for _, q in subset.iterrows():
+            score, why = score_offer(q, {"size_std": size_h, "loc_c": loc_h, "is_organic": is_og}, bench_price)
+            offers.append({
+                "customer": cust,
+                "product": prod,
+                "organic": "OG" if is_og else "CV",
+                "size_hist": size_h,
+                "loc_hist": loc_h,
+                "vendor": q["vendor_c"],
+                "price": float(q["price"]),
+                "score": float(score),
+                "why": why,
+            })
+
+    if not offers:
+        return pd.DataFrame()
+    out = pd.DataFrame(offers)
+    out = out.sort_values(["customer","product","score","price"], ascending=[True, True, False, True])
+    out = out.groupby(["customer","product"], as_index=False).head(top_k)
+    return out
+
+# ------------------------
 # UI CONTROLS
 # ------------------------
 with st.sidebar:
@@ -411,34 +491,20 @@ qdf_day = qdf_all[qdf_all["date"].dt.date == pd.to_datetime(selected_day).date()
 if qdf_day.empty:
     st.warning("No hay cotizaciones para la fecha seleccionada.")
 
-# 2) Vendors recientes en ventas (últimos N días)
-vstats = recent_vendor_stats(sdf, days_window=days)
-recent_vendors_set = set(vstats["vendor_c"].dropna().unique())
+# 2) Compras recientes por cliente/producto en la ventana
+sdf_recent_cust = recent_purchases(sdf, days_window=days)
+customers = sorted(sdf_recent_cust["customer_c"].dropna().unique().tolist())
 
-# 3) Match: vendors del Daily Sheet del día ∩ vendors con ventas recientes
-if not qdf_day.empty:
-    vendors_today = (
-        qdf_day.groupby("vendor_c").agg(
-            avg_price=("price", "mean"),
-            best_price=("price", "min"),
-            n_quotes=("vendor_c", "count"),
-            locations=("loc_c", lambda s: ", ".join(sorted(set([x for x in s if isinstance(x, str) and x])))),
-        ).reset_index()
-    )
-    vendors_today["match_recent_sales"] = vendors_today["vendor_c"].apply(lambda v: v in recent_vendors_set)
-    vendors_today = vendors_today.merge(vstats, on="vendor_c", how="left")
-    if only_matches:
-        vendors_today_show = vendors_today[vendors_today["match_recent_sales"]].copy()
-    else:
-        vendors_today_show = vendors_today.copy()
-
-    st.subheader("Vendors del Daily Sheet (día seleccionado)")
-    st.caption("Señalamos cuáles ya nos vendieron en los últimos días y sus estadísticas recientes.")
-    st.dataframe(
-        vendors_today_show.sort_values(["match_recent_sales", "best_price"], ascending=[False, True])
-    )
+# 3) Ofertas del día por cliente (usando SOLO Daily Sheet del día)
+st.subheader("Ofertas del día por cliente")
+if qdf_day.empty or sdf_recent_cust.empty:
+    st.info("Carga cotizaciones del día y asegúrate de tener ventas recientes en la ventana.")
 else:
-    vendors_today_show = pd.DataFrame()
+    offers = build_customer_offers(qdf_day, sdf_recent_cust, sdf, bench_days=30, top_k=topk)
+    if offers.empty:
+        st.warning("No hay ofertas relevantes para los clientes en esta ventana con el Daily Sheet del día.")
+    else:
+        st.dataframe(offers)
 
 # ------------------------
 # (Opcional) Compras recientes por cliente/producto + Recs usando SOLO el Daily Sheet del día
@@ -479,14 +545,30 @@ with st.expander("Compras recientes por cliente/producto y recomendaciones (usan
                 st.dataframe(vend_counts)
 
 # ------------------------
+# (Opcional) Vista de compras recientes
+# ------------------------
+with st.expander("Ver compras recientes agregadas por cliente/producto", expanded=False):
+    sdf_recent_cust = recent_purchases(sdf, days_window=days)
+    if sdf_recent_cust.empty:
+        st.info("No hay compras recientes en la ventana seleccionada.")
+    else:
+        customers = sorted(sdf_recent_cust["customer_c"].dropna().unique().tolist())
+        sel_customers = st.multiselect("Clientes", customers, default=customers[: min(10, len(customers))])
+        subset_recent = sdf_recent_cust[sdf_recent_cust["customer_c"].isin(sel_customers)].copy()
+        st.dataframe(subset_recent.rename(columns={
+            "customer_c": "customer", "product_canon": "product", "is_organic": "organic",
+            "size_std": "size", "loc_c": "location", "quantity": "qty", "last_price": "last_price"
+        }))
+
+# ------------------------
 # NOTAS DE AJUSTE
 # ------------------------
 st.markdown(
     """
 **Notas/ajustes rápidos:**
-- La sección principal ahora filtra por **fecha del Daily Sheet** (por defecto, hoy Bogotá) y hace **match de vendors** con ventas recientes (ventana configurable).
-- Si deseas que el match solo considere cotizaciones del mismo **Location**, agrega `merge` adicional por `loc_c` o filtra `qdf_day` por `loc_c` antes del `groupby`.
-- Los pesos de score se ajustan en `candidate_vendors`. La familiaridad suma +0.2.
-- Para cotizaciones muy grandes, considera filtrar por fecha también en `load_quotations()` vía un `.gte()` en Supabase para reducir tráfico.
+- Ahora el foco es **CLIENTES**: sugerimos qué ofrecerles hoy (Daily Sheet del día) según lo que compraron en la ventana de días.
+- El score prioriza **mejora de precio vs. la mediana** que ese cliente pagó recientemente para ese producto (y opcionalmente mismo size/location), más coincidencia de **OG/CV**, **tamaño** y **ubicación**.
+- Ajusta `bench_days` si prefieres otra ventana para el benchmark; `top_k` controla cuántas ofertas por cliente/producto.
+- Si prefieres exigir match exacto de tamaño/ubicación para ofertar, filtra `qdf_day` antes del scoring.
     """
 )
