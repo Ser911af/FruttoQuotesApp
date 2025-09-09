@@ -29,55 +29,27 @@ LOGO_PATH   = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"
 
 # ------------------------
-# Credenciales Supabase (nueva estructura por secciones)
+# Credenciales Supabase (nueva estructura)
 # ------------------------
 def _read_section(section_name: str = "supabase_quotes") -> dict:
     """
     Lee una sección de st.secrets (p.ej. 'supabase_quotes') y valida claves mínimas.
-    Estructura esperada:
-      [supabase_quotes]
-      url = "https://xxx.supabase.co"
-      anon_key = "eyJ..."
-      table = "quotations"
-      schema = "public"
-    Fallbacks:
-      - SUPABASE_URL / SUPABASE_ANON_KEY en secrets o entorno.
+    Espera:
+      url, anon_key, table (def: quotations), schema (def: public)
     """
-    sec = {}
-    # 1) Sección recomendada
     try:
-        block = st.secrets.get(section_name, {})
-        if isinstance(block, dict):
-            sec.update(block)
+        sec = st.secrets[section_name]
     except Exception:
-        pass
-
-    # 2) Fallback claves planas en secrets
-    if not sec.get("url"):
-        u = st.secrets.get("SUPABASE_URL", None)
-        if u: sec["url"] = u
-    if not sec.get("anon_key"):
-        k = st.secrets.get("SUPABASE_ANON_KEY", st.secrets.get("SUPABASE_KEY", None))
-        if k: sec["anon_key"] = k
-
-    # 3) Fallback variables de entorno
-    if not sec.get("url"):
-        u = os.getenv("SUPABASE_URL")
-        if u: sec["url"] = u
-    if not sec.get("anon_key"):
-        k = os.getenv("SUPABASE_ANON_KEY", os.getenv("SUPABASE_KEY"))
-        if k: sec["anon_key"] = k
-
-    # Defaults de tabla y schema
-    sec["table"]  = (sec.get("table") or "quotations").strip()
-    sec["schema"] = (sec.get("schema") or "public").strip()
-
-    if not sec.get("url") or not sec.get("anon_key"):
-        raise RuntimeError(
-            "No encontré credenciales de Supabase. "
-            "Define la sección '[supabase_quotes]' en secrets, o SUPABASE_URL / SUPABASE_ANON_KEY."
-        )
-    return sec
+        # Compat con claves planas/entorno como fallback
+        sec = {}
+    # Tomar url/key de la sección si existe
+    url = (sec.get("url") if isinstance(sec, dict) else None) or st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+    key = (sec.get("anon_key") if isinstance(sec, dict) else None) or st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_KEY")
+    if not url or not key:
+        raise RuntimeError("No encontré credenciales de Supabase. Define [supabase_quotes] en secrets o usa SUPABASE_URL/SUPABASE_ANON_KEY.")
+    table = (sec.get("table") if isinstance(sec, dict) else None) or "quotations"
+    schema = (sec.get("schema") if isinstance(sec, dict) else None) or "public"
+    return {"url": url, "key": key, "table": table, "schema": schema}
 
 def _create_client(url: str, key: str):
     try:
@@ -87,9 +59,7 @@ def _create_client(url: str, key: str):
     return create_client(url, key)
 
 def _sb_table(sb, schema: str, table: str):
-    """
-    Devuelve un handle a la tabla respetando el schema si tu cliente lo soporta.
-    """
+    """Devuelve handle a la tabla; respeta schema si el cliente lo soporta."""
     try:
         return sb.schema(schema).table(table)  # supabase-py v2+
     except Exception:
@@ -99,15 +69,20 @@ def _sb_table(sb, schema: str, table: str):
 # Fetch quotations
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_quotations_from_supabase(section_name: str = "supabase_quotes"):
+def fetch_all_quotations_from_supabase():
     """Trae quotations paginado; ante errores devuelve DF vacío (no rompe UI)."""
-    # Cargar credenciales (por sección)
+    # Cargar credenciales
     try:
-        cfg = _read_section(section_name)
-        sb = _create_client(cfg["url"], cfg["anon_key"])
-        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
+        cfg = _read_section("supabase_quotes")
     except Exception as e:
         st.error(str(e))
+        return pd.DataFrame()
+
+    try:
+        sb = _create_client(cfg["url"], cfg["key"])
+        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
+    except Exception as e:
+        st.error(f"Config/cliente Supabase inválido: {e}")
         return pd.DataFrame()
 
     frames, page_size = [], 1000
@@ -166,14 +141,14 @@ def fetch_all_quotations_from_supabase(section_name: str = "supabase_quotes"):
         "vendorclean":"VendorClean"
     })
 
-    # FIX: usar .str.upper() para filtrar filas con 'PAS'
+    # FIX: filtrar textos tipo "PAS" en Price
     df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
 
     df = df.sort_values("cotization_date", ascending=False)
     return df
 
 # ---------- UI ----------
-df = fetch_all_quotations_from_supabase("supabase_quotes")
+df = fetch_all_quotations_from_supabase()
 
 col1, col2 = st.columns([3, 1])
 with col1:
