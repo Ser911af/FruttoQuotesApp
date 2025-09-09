@@ -6,6 +6,12 @@ import altair as alt
 # ------------------------
 # FruttoFoods Explorer (Supabase)
 # ------------------------
+
+from auth_helpers import login_and_require
+
+user = login_and_require(allowed_roles={"buyer", "admin"})
+# Ya puedes usar `user["name"]`, `user["role"]`, etc.
+
 st.set_page_config(page_title="FruttoFoods Explorer", layout="wide")
 
 LOGO_PATH   = "data/Asset 7@4x.png"
