@@ -1,41 +1,44 @@
 import streamlit as st
-from auth_simple import ensure_auth, do_login_ui, current_user, logout_button
-import os, sys
-from pathlib import Path
-import streamlit as st
+from auth_helpers import require_login
 
-HERE = Path(__file__).resolve().parent
-ROOT = Path.cwd().resolve()
+st.set_page_config(page_title="FruttoQuotes • Home", page_icon="🏠", layout="wide")
 
-st.write("🔎 Debug paths",
-         {"__file__": str(__file__),
-          "script_dir": str(HERE),
-          "cwd": str(ROOT),
-          "files_in_script_dir": [p.name for p in HERE.iterdir() if p.is_file()],
-          "files_in_cwd": [p.name for p in ROOT.iterdir() if p.is_file()],
-          "sys.path": sys.path[:5]})  # muestra primeros 5
+st.title("🏠 FruttoQuotes")
+st.caption("Inicio • Control de acceso con OIDC (st.login)")
 
-st.stop()  # ← temporalmente para ver el debug
+# --- Encabezado de sesión (mostrar login/logout) ---
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.write("Bienvenido a FruttoQuotes. Usa el menú para ir a las secciones.")
 
-st.set_page_config(page_title="AppFruttoQuotations", layout="wide")
+with col2:
+    if not st.user.is_logged_in:
+        # Puedes cambiar el provider por "microsoft", "okta", "auth0", etc. si definiste [auth.<provider>]
+        st.button("Iniciar sesión", on_click=lambda: st.login())  # usa proveedor por defecto en [auth]
+    else:
+        st.write(f"👤 {st.user.name}")
+        st.button("Cerrar sesión", on_click=st.logout)
 
-# Si no hay sesión, mostramos el login AQUÍ (único lugar)
-if not ensure_auth():
-    do_login_ui(location="main")
+st.divider()
+
+# --- Si no está logueado, muestro CTA y no enseño navegación ---
+if not st.user.is_logged_in:
+    st.info(
+        "Debes iniciar sesión para acceder a las páginas. "
+        "Haz clic en **Iniciar sesión** arriba (usa el proveedor OIDC que configuraste)."
+    )
     st.stop()
 
-# Ya autenticado
-logout_button(location="sidebar")
+# --- Contenido para usuarios autenticados ---
+st.success(f"Autenticado como: {st.user.name}")
+# Estos campos dependen del IdP; muchos devuelven email y sub:
+st.write("Email:", getattr(st.user, "email", "—"))
+st.write("ID (sub):", getattr(st.user, "sub", "—"))
 
-username, name, role = current_user()
-st.title("AppFruttoQuotations")
-st.caption(f"Bienvenido, {name} — Rol: {role}")
+st.subheader("Navegación rápida")
+# Navegación multipágina (en versiones recientes puedes usar page_link)
+st.page_link("pages/0_Explorer.py", label="🔎 Explorer")
+st.page_link("pages/1_Daily_Sheet.py", label="📊 Daily Sheet")
+st.page_link("pages/2_Upload_Quotes.py", label="📤 Upload Quotes")
 
-st.markdown(
-    """
-    ### ¿Qué quieres hacer hoy?
-    - **Explorer**: Explorar cotizaciones, filtrar y ver métricas rápidas.
-    - **Daily Sheet**: Cargar/editar la hoja diaria.
-    - **Upload Quotes**: Subir cotizaciones desde archivos.
-    """
-)
+st.caption("Tip: Usa la barra lateral de Streamlit para moverte entre páginas.")
