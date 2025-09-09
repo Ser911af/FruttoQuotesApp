@@ -22,13 +22,19 @@ def get_authenticator():
         cookie_expiry_days=cookie_expiry_days,
     )
 
+# auth.py  (reemplaza solo esta función)
+import streamlit as st
+
 def require_login(authenticator, location="main"):
     """
     location: 'main' | 'sidebar' | 'unrendered'
     Retorna (name, auth_status, username).
-    Hace fallback a firmas antiguas de streamlit-authenticator.
+    Evita 'duplicate form key' usando claves únicas.
     """
-    # 1) Intentar API nueva (location primero + fields)
+    form_key = f"login_{location}"            # <- clave única
+    form_name_fallback = f"Login ({location})"  # <- para API vieja
+
+    # 1) API nueva (0.4.x): location primero + fields + key=...
     try:
         name, auth_status, username = authenticator.login(
             location,
@@ -38,14 +44,15 @@ def require_login(authenticator, location="main"):
                 "Password": "Contraseña",
                 "Login": "Entrar",
             },
+            key=form_key,   # <- clave única
         )
     except TypeError:
-        # 2) Intentar API intermedia (solo location)
+        # 2) API intermedia (0.3.x reciente): login(location, key=...)
         try:
-            name, auth_status, username = authenticator.login(location)
+            name, auth_status, username = authenticator.login(location, key=form_key)
         except TypeError:
-            # 3) Intentar API antigua (form_name, location)
-            name, auth_status, username = authenticator.login("Login", location)
+            # 3) API antigua (0.3.x): login(form_name, location)
+            name, auth_status, username = authenticator.login(form_name_fallback, location)
 
     if auth_status is False:
         st.error("Usuario/contraseña incorrectos.")
