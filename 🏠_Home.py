@@ -1,19 +1,17 @@
 import streamlit as st
-from auth import get_authenticator, require_login, logout_button, current_role
+from auth_simple import ensure_auth, do_login_ui, current_user, logout_button
 
 st.set_page_config(page_title="AppFruttoQuotations", layout="wide")
 
-# --- Auth ---
-authenticator = get_authenticator()
-name, auth_status, username = require_login(authenticator, location="main")
-
-if not auth_status:
+# Si no hay sesión, muestra el form de login aquí (no en otras páginas)
+if not ensure_auth():
+    do_login_ui(location="main")
     st.stop()
 
-logout_button(authenticator, location="sidebar")
-role = current_role(username)
+# Ya autenticado
+logout_button(location="sidebar")
 
-# --- UI ---
+username, name, role = current_user()
 st.title("AppFruttoQuotations")
 st.caption(f"Bienvenido, {name} — Rol: {role}")
 
@@ -25,8 +23,3 @@ st.markdown(
     - **Upload Quotes**: Subir cotizaciones desde archivos.
     """
 )
-
-with st.sidebar:
-    st.markdown("### Sesión")
-    st.write(f"Usuario: **{username}**")
-    st.write(f"Rol: **{role}**")
