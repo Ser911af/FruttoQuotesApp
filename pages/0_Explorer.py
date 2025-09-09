@@ -3,7 +3,7 @@ import os
 import pandas as pd
 import streamlit as st
 
-# Auth simple (sin librerías externas)
+# Auth simple (asegúrate de tener simple_auth.py en la raíz del proyecto)
 from simple_auth import ensure_login, logout_button
 
 # Altair opcional (no rompe si no está instalado)
@@ -88,6 +88,8 @@ def fetch_all_quotations_from_supabase():
     df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
+
+    # Filtra filas sin precio numérico
     df = df.dropna(subset=["Price"])
 
     vol_std = pd.to_numeric(df["volume_standard"], errors="coerce")
@@ -102,8 +104,8 @@ def fetch_all_quotations_from_supabase():
         "vendorclean":"VendorClean"
     })
 
-    # Quitar renglones marcados como “PAS”
-    df = df[~df["Price"].astype(str).upper().str.contains("PAS", na=False)]
+    # ✅ FIX: usar .str.upper() (antes era .upper())
+    df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
 
     df = df.sort_values("cotization_date", ascending=False)
     return df
