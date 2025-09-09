@@ -7,10 +7,28 @@ import altair as alt
 # FruttoFoods Explorer (Supabase)
 # ------------------------
 
-from auth_helpers import login_and_require
+import streamlit as st
+from auth import get_authenticator, require_login, logout_button, current_role
 
-user = login_and_require(allowed_roles={"buyer", "admin"})
-# Ya puedes usar `user["name"]`, `user["role"]`, etc.
+st.set_page_config(page_title="Explorer", layout="wide")
+
+authenticator = get_authenticator()
+name, auth_status, username = require_login(authenticator, location="sidebar")
+
+if not auth_status:
+    st.stop()
+
+logout_button(authenticator, location="sidebar")
+role = current_role(username)
+
+st.title("Explorer")
+st.caption(f"Tu rol: {role}")
+
+# Ejemplo de control por rol
+if role in {"admin", "editor"}:
+    st.write("Contenido editable…")
+else:
+    st.warning("Solo lectura para tu rol.")
 
 st.set_page_config(page_title="FruttoFoods Explorer", layout="wide")
 
