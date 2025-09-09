@@ -28,29 +28,35 @@ with st.sidebar:
 LOGO_PATH   = "data/Asset 7@4x.png"
 BRAND_GREEN = "#8DC63F"
 
-def _load_supabase_creds():
+# ------------------------
+# Credenciales Supabase (nueva estructura)
+# ------------------------
+def _load_supabase_creds(block: str = "supabase_quotes"):
     """
+    Carga credenciales de Supabase desde secrets.
     Prioridad:
-      1) st.secrets['supabase_quotes'] -> url / anon_key / table
+      1) st.secrets['supabase_quotes'] -> url / anon_key / table / schema
       2) st.secrets SUPABASE_URL / SUPABASE_ANON_KEY (planos)
       3) Variables de entorno SUPABASE_URL / SUPABASE_ANON_KEY
     """
     url = None
     key = None
     table = "quotations"
+    schema = "public"
 
-    # 1) Namespace recomendado
-    sq = st.secrets.get("supabase_quotes", {})
-    if isinstance(sq, dict):
-        url = sq.get("url") or url
-        key = sq.get("anon_key") or sq.get("key") or key
-        table = sq.get("table") or table
+    # 1) Namespace recomendado en secrets
+    sb_block = st.secrets.get(block, {})
+    if isinstance(sb_block, dict):
+        url = sb_block.get("url") or url
+        key = sb_block.get("anon_key") or sb_block.get("key") or key
+        table = sb_block.get("table") or table
+        schema = sb_block.get("schema") or schema
 
     # 2) Claves planas en secrets
     if not url:
-        url = st.secrets.get("SUPABASE_URL", None)
+        url = st.secrets.get("SUPABASE_URL")
     if not key:
-        key = st.secrets.get("SUPABASE_ANON_KEY", None) or st.secrets.get("SUPABASE_KEY", None)
+        key = st.secrets.get("SUPABASE_ANON_KEY") or st.secrets.get("SUPABASE_KEY")
 
     # 3) Fallback a entorno
     if not url:
@@ -61,8 +67,11 @@ def _load_supabase_creds():
     if not url or not key:
         raise RuntimeError("No encontré credenciales de Supabase. Define 'supabase_quotes' en secrets o las claves planas.")
 
-    return url, key, table
+    return url, key, schema, table
 
+# ------------------------
+# Fetch quotations
+# ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_quotations_from_supabase():
     """Trae quotations paginado; ante errores devuelve DF vacío (no rompe UI)."""
@@ -72,14 +81,13 @@ def fetch_all_quotations_from_supabase():
         st.error(f"Falta 'supabase' en requirements: {e}")
         return pd.DataFrame()
 
-    # Cargar credenciales (namespace + fallbacks)
+    # Cargar credenciales
     try:
-        SUPABASE_URL, SUPABASE_KEY, TABLE = _load_supabase_creds()
+        SUPABASE_URL, SUPABASE_KEY, SCHEMA, TABLE = _load_supabase_creds("supabase_quotes")
     except Exception as e:
         st.error(str(e))
         return pd.DataFrame()
 
-    # ⚠️ Recomendación: usa SIEMPRE anon_key + RLS activas.
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     frames, page_size = [], 1000
@@ -87,7 +95,8 @@ def fetch_all_quotations_from_supabase():
         start, end = i*page_size, i*page_size + page_size - 1
         try:
             resp = (
-                sb.table(TABLE)
+                sb.schema(SCHEMA)
+                  .table(TABLE)
                   .select(
                       "cotization_date,organic,product,price,location,"
                       "volume_num,volume_unit,volume_standard,vendorclean"
@@ -125,7 +134,6 @@ def fetch_all_quotations_from_supabase():
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
 
-    # Filtra filas sin precio numérico
     df = df.dropna(subset=["Price"])
 
     vol_std = pd.to_numeric(df["volume_standard"], errors="coerce")
@@ -140,7 +148,7 @@ def fetch_all_quotations_from_supabase():
         "vendorclean":"VendorClean"
     })
 
-    # ✅ FIX: usar .str.upper() (antes era .upper())
+    # FIX: usar .str.upper()
     df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
 
     df = df.sort_values("cotization_date", ascending=False)
