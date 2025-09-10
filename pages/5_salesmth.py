@@ -10,6 +10,7 @@ try:
 except Exception:
     create_client = None
 
+st.set_page_config(page_title="Match diario: Cotizaciones vs Ventas", layout="wide")
 st.markdown("## 🔎 Match diario: Cotizaciones vs Ventas (solo lectura)")
 
 # ------------------------
@@ -27,18 +28,12 @@ def _as_bool_organic(x) -> bool:
         return bool(x)
     if x is None or (isinstance(x, float) and np.isnan(x)):
         return False
-    s = str(x).strip().lower()
-    return s in {"og", "organic", "true", "t", "1", "yes", "y"} or (isinstance(x, (int, np.integer)) and int(x) == 1)
-
-def _money_to_float(x):
-    if pd.isna(x):
-        return np.nan
-    s = str(x)
-    s = "".join(ch for ch in s if (ch.isdigit() or ch in ".-"))
+    # preferimos 0/1
     try:
-        return float(s) if s != "" else np.nan
+        return bool(int(x))
     except Exception:
-        return np.nan
+        s = str(x).strip().lower()
+        return s in {"og", "organic", "true", "t", "1", "yes", "y"}
 
 def _loc_match_soft(a: str, b: str) -> float:
     """1.0 si iguales; 0.5 si una contiene a la otra; 0.0 si distintas."""
@@ -56,46 +51,86 @@ def _loc_match_soft(a: str, b: str) -> float:
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def load_quotations_from_supabase() -> pd.DataFrame:
-    """Lee toda la tabla quotations en Supabase (solo lectura)."""
+    """
+    Lee la tabla REAL 'quotations' en Supabase (solo lectura) con select explícito.
+    Espera:
+      - cotization_date: texto "M/D/YYYY"
+      - product: text
+      - organic: int (0/1)
+      - price: numeric
+      - location: text
+      - vendorclean: text
+    """
     sec = st.secrets.get("supabase_quotes", {})
     if not create_client or not sec:
         st.error("Falta configurar st.secrets['supabase_quotes'] (url, anon_key, table).")
         return pd.DataFrame()
+
     sb = create_client(sec["url"], sec["anon_key"])
     table_name = sec.get("table", "quotations")
 
     rows, limit, offset = [], 2000, 0
-    while True:
-        resp = sb.table(table_name).select("*").range(offset, offset+limit-1).execute()
-        data = resp.data or []
-        rows.extend(data)
-        if len(data) < limit:
-            break
-        offset += limit
+    cols = "id,cotization_date,product,organic,price,location,vendorclean"
+
+    try:
+        while True:
+            # order() mejora la consistencia de paginación
+            resp = (
+                sb.table(table_name)
+                  .select(cols)
+                  .order("id", desc=False)
+                  .range(offset, offset + limit - 1)
+                  .execute()
+            )
+            data = resp.data or []
+            rows.extend(data)
+            if len(data) < limit:
+                break
+            offset += limit
+    except Exception as e:
+        st.error(f"Error leyendo '{table_name}': {e}")
+        return pd.DataFrame()
+
     df = pd.DataFrame(rows)
     if df.empty:
+        st.warning(f"'{table_name}' devolvió 0 filas. Revisa RLS/Policies y el schema.")
         return df
+
+    # Validación rápida de columnas
+    needed = {"cotization_date","product","organic","price","location","vendorclean"}
+    missing = needed - set(df.columns)
+    if missing:
+        st.error(f"Faltan columnas en '{table_name}': {missing}.")
+        st.write("Columnas disponibles:", list(df.columns))
+        return pd.DataFrame()
 
     # Normalización
     q = pd.DataFrame({
-        "q_date_str": df.get("cotization_date"),
-        "product": df.get("product"),
-        "organic_int": df.get("organic"),
-        "price": df.get("price"),
-        "loc": df.get("location"),
-        "vendor": df.get("vendorclean"),
+        "q_date_str": df["cotization_date"],
+        "product": df["product"],
+        "organic_int": df["organic"],
+        "price": pd.to_numeric(df["price"], errors="coerce"),
+        "loc": df["location"],
+        "vendor": df["vendorclean"],
     })
-    # Parse fecha: M/D/YYYY
+
+    # Fecha: tu formato es M/D/YYYY (ej. 8/13/2025)
     q["q_date"] = pd.to_datetime(q["q_date_str"], errors="coerce", format="%m/%d/%Y")
-    q["product_n"] = q["product"].astype(str).map(_normalize_txt)
+    q["product_n"]  = q["product"].astype(str).map(_normalize_txt)
     q["is_organic"] = q["organic_int"].map(_as_bool_organic)
-    q["price"] = pd.to_numeric(q["price"], errors="coerce")
-    q["loc_n"] = q["loc"].astype(str).map(_normalize_txt)
-    q["vendor_n"] = q["vendor"].astype(str).map(_normalize_txt)
+    q["loc_n"]      = q["loc"].astype(str).map(_normalize_txt)
+    q["vendor_n"]   = q["vendor"].astype(str).map(_normalize_txt)
 
     q = q.dropna(subset=["q_date", "product_n", "price"])
-    # Nos quedamos con las columnas que usaremos
-    return q[["q_date", "product_n", "is_organic", "price", "loc_n", "vendor_n"]]
+
+    # Diagnóstico útil
+    st.caption(
+        f"Quotations: {len(q)} filas tras normalizar. Rango fechas: "
+        f"{q['q_date'].min().date() if not q.empty else '—'} → "
+        f"{q['q_date'].max().date() if not q.empty else '—'}"
+    )
+
+    return q[["q_date","product_n","is_organic","price","loc_n","vendor_n"]]
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_sales_readonly() -> pd.DataFrame:
@@ -103,7 +138,7 @@ def load_sales_readonly() -> pd.DataFrame:
     Lee ventas de tu tabla 'ventas_frutto' **sin escribir**.
     Prioridad:
       1) Supabase (st.secrets['supabase_sales'] con table='ventas_frutto')
-      2) MSSQL (st.secrets['mssql_sales'] con DSN/conn string) -> opcional
+      2) MSSQL (st.secrets['mssql_sales']) -> opcional (no implementado aquí)
     """
     # 1) Supabase
     sec = st.secrets.get("supabase_sales", {})
@@ -111,16 +146,30 @@ def load_sales_readonly() -> pd.DataFrame:
         sb = create_client(sec["url"], sec["anon_key"])
         table_name = sec.get("table", "ventas_frutto")
         rows, limit, offset = [], 5000, 0
-        while True:
-            resp = sb.table(table_name).select("*").range(offset, offset+limit-1).execute()
-            data = resp.data or []
-            rows.extend(data)
-            if len(data) < limit:
-                break
-            offset += limit
+        # selecciona solo campos necesarios para rendimiento
+        cols = (
+            "reqs_date,product,organic,sale_location,lot_location,"
+            "customer,vendor,quantity,price_per_unit"
+        )
+        try:
+            while True:
+                resp = (
+                    sb.table(table_name)
+                      .select(cols)
+                      .range(offset, offset + limit - 1)
+                      .execute()
+                )
+                data = resp.data or []
+                rows.extend(data)
+                if len(data) < limit:
+                    break
+                offset += limit
+        except Exception as e:
+            st.error(f"Error leyendo '{table_name}': {e}")
+            return pd.DataFrame()
         df = pd.DataFrame(rows)
     else:
-        # 2) MSSQL (opcional — dejar esqueleto sin ejecutar si no hay secretos)
+        # 2) MSSQL (opcional)
         ms = st.secrets.get("mssql_sales", None)
         if ms:
             st.warning("Conector MSSQL no implementado en este snippet. Usa pyodbc/sqlalchemy en solo lectura.")
@@ -205,7 +254,7 @@ recent_buys = (
     .reset_index()
 )
 
-# Benchmark 30 días (o recent_days elegido) por cliente+producto exacto
+# Benchmark por cliente+producto exacto (ventana recent_days)
 cutoff_bench = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=recent_days)
 s_bench = sdf.loc[sdf["date"] >= cutoff_bench].copy()
 bench = (
@@ -218,14 +267,13 @@ bench = (
 # ------------------------
 # Match: por product exacto + OG/CV; ubicación suave
 # ------------------------
-# Expandimos ubicaciones históricas por cliente+producto
+# Ubicaciones históricas vistas para cada (cliente, producto)
 cust_prod_locs = (
     sdf.groupby(["customer_n","product_n","is_organic","loc_n"], dropna=False)
     .size().reset_index(name="n")
-[["customer_n","product_n","is_organic","loc_n"]]
-)
+)[["customer_n","product_n","is_organic","loc_n"]]
 
-# Construimos candidatos: combinamos cada (cliente, producto) reciente con cotizaciones del día del mismo producto/OG
+# Candidatos: (cliente,producto) recientes x cotizaciones del día del mismo producto/OG
 candidates = (
     recent_buys.merge(qdf_day, how="inner", on=["product_n","is_organic"])
                .merge(cust_prod_locs, how="left", on=["customer_n","product_n","is_organic"])
@@ -236,9 +284,8 @@ if candidates.empty:
     st.stop()
 
 # Score por cercanía de ubicación
+# tras el merge, loc_n_x viene del histórico (cust_prod_locs), loc_n_y viene de qdf_day
 candidates["loc_match"] = candidates.apply(lambda r: _loc_match_soft(r.get("loc_n_y"), r.get("loc_n_x")), axis=1)
-# Nota: tras el merge, loc_n_x viene del histórico (cust_prod_locs), loc_n_y viene de qdf_day
-# renombraremos para claridad
 candidates = candidates.rename(columns={"loc_n_x":"loc_hist","loc_n_y":"loc_quote"})
 
 # Adjuntamos benchmark por cliente+producto
@@ -256,9 +303,10 @@ candidates["price_improvement"] = candidates.apply(_price_improv, axis=1)
 # Score final: precio (peso 1.0) + ubicación (0.3)
 candidates["score"] = candidates["price_improvement"].fillna(0.0) + 0.3 * candidates["loc_match"].fillna(0.0)
 
-# Orden y selección de columnas
+# Orden y columnas
 out = candidates[[
-    "customer_n","product_n","is_organic","vendor_n","loc_quote","price","bench_price","price_improvement","score","qty_recent","last_buy","loc_hist"
+    "customer_n","product_n","is_organic","vendor_n","loc_quote","price",
+    "bench_price","price_improvement","score","qty_recent","last_buy","loc_hist"
 ]].copy()
 
 out = out.sort_values(["customer_n","product_n","score","price"], ascending=[True, True, False, True])
