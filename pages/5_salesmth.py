@@ -1,345 +1,267 @@
-# --- MATCH COTIZACIONES (quotations) vs VENTAS (ventas_frutto) EN MEMORIA (SOLO LECTURA) ---
-
+# ========= DROP-IN: Carga de ventas con diagnóstico y detectores =========
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
-import datetime as dt
 import streamlit as st
 
+# Si no existe create_client, manten compatibilidad
 try:
     from supabase import create_client
 except Exception:
     create_client = None
 
-st.set_page_config(page_title="Match diario: Cotizaciones vs Ventas", layout="wide")
-st.markdown("## 🔎 Match diario: Cotizaciones vs Ventas (solo lectura)")
+# ---- Utilidad de errores centralizada
+def _errlog(msg: str, exc: Exception | None = None):
+    key = "_sales_errors"
+    if key not in st.session_state:
+        st.session_state[key] = []
+    m = f"❌ {msg}" + (f" | {type(exc).__name__}: {exc}" if exc else "")
+    st.session_state[key].append(m)
+    # para ver también en consola
+    print(m)
 
-# ------------------------
-# Helpers
-# ------------------------
-def _normalize_txt(s: str) -> str:
-    if s is None:
-        return ""
-    s = str(s).strip().lower()
-    s = " ".join(s.split())
-    return s
-
-def _as_bool_organic(x) -> bool:
-    if isinstance(x, (bool, np.bool_)):
-        return bool(x)
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return False
-    # preferimos 0/1
+# ---- Cliente Supabase robusto
+def _load_supabase_client(secret_key: str):
+    sec = st.secrets.get(secret_key)
+    if not sec or not create_client:
+        _errlog(f"No hay secretos '{secret_key}' o supabase no instalado.")
+        return None
+    url, key = sec.get("url"), sec.get("anon_key")
+    if not url or not key:
+        _errlog(f"Faltan url/anon_key en secrets['{secret_key}'].")
+        return None
     try:
-        return bool(int(x))
-    except Exception:
-        s = str(x).strip().lower()
-        return s in {"og", "organic", "true", "t", "1", "yes", "y"}
-
-def _loc_match_soft(a: str, b: str) -> float:
-    """1.0 si iguales; 0.5 si una contiene a la otra; 0.0 si distintas."""
-    A, B = _normalize_txt(a), _normalize_txt(b)
-    if not A or not B:
-        return 0.0
-    if A == B:
-        return 1.0
-    if A in B or B in A:
-        return 0.5
-    return 0.0
-
-# ------------------------
-# Loaders (solo SELECT)
-# ------------------------
-@st.cache_data(ttl=300, show_spinner=False)
-def load_quotations_from_supabase() -> pd.DataFrame:
-    """
-    Lee la tabla REAL 'quotations' en Supabase (solo lectura) con select explícito.
-    Espera:
-      - cotization_date: texto "M/D/YYYY"
-      - product: text
-      - organic: int (0/1)
-      - price: numeric
-      - location: text
-      - vendorclean: text
-    """
-    sec = st.secrets.get("supabase_quotes", {})
-    if not create_client or not sec:
-        st.error("Falta configurar st.secrets['supabase_quotes'] (url, anon_key, table).")
-        return pd.DataFrame()
-
-    sb = create_client(sec["url"], sec["anon_key"])
-    table_name = sec.get("table", "quotations")
-
-    rows, limit, offset = [], 2000, 0
-    cols = "id,cotization_date,product,organic,price,location,vendorclean"
-
-    try:
-        while True:
-            # order() mejora la consistencia de paginación
-            resp = (
-                sb.table(table_name)
-                  .select(cols)
-                  .order("id", desc=False)
-                  .range(offset, offset + limit - 1)
-                  .execute()
-            )
-            data = resp.data or []
-            rows.extend(data)
-            if len(data) < limit:
-                break
-            offset += limit
+        client = create_client(url, key)
+        client._schema = sec.get("schema", "public")
+        return client
     except Exception as e:
-        st.error(f"Error leyendo '{table_name}': {e}")
-        return pd.DataFrame()
+        _errlog("Fallo creando cliente Supabase.", e)
+        return None
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.warning(f"'{table_name}' devolvió 0 filas. Revisa RLS/Policies y el schema.")
-        return df
+# ---- Rangos de tiempo
+def utc_bounds_days_back(days_back: int) -> tuple[str, str]:
+    tz_bog = ZoneInfo("America/Bogota")
+    end = datetime.now(tz_bog)                # ahora Bogotá
+    start = end - timedelta(days=days_back)   # ventana hacia atrás
+    return start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
 
-    # Validación rápida de columnas
-    needed = {"cotization_date","product","organic","price","location","vendorclean"}
-    missing = needed - set(df.columns)
-    if missing:
-        st.error(f"Faltan columnas en '{table_name}': {missing}.")
-        st.write("Columnas disponibles:", list(df.columns))
-        return pd.DataFrame()
+def bogota_day_bounds(day: datetime.date) -> tuple[str, str]:
+    tz = ZoneInfo("America/Bogota")
+    start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=tz)
+    end   = start + timedelta(days=1)
+    return start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()
 
-    # Normalización
-    q = pd.DataFrame({
-        "q_date_str": df["cotization_date"],
-        "product": df["product"],
-        "organic_int": df["organic"],
-        "price": pd.to_numeric(df["price"], errors="coerce"),
-        "loc": df["location"],
-        "vendor": df["vendorclean"],
-    })
+# ---- Normalizadores base (reutiliza tus helpers si ya existen)
+import re, math
+def _normalize_txt(s): 
+    s = "" if s is None else str(s).lower()
+    s = re.sub(r"[\s/_\-]+", " ", s)
+    s = re.sub(r"[^\w\s\.\+]", "", s)
+    return s.strip()
 
-    # Fecha: tu formato es M/D/YYYY (ej. 8/13/2025)
-    q["q_date"] = pd.to_datetime(q["q_date_str"], errors="coerce", format="%m/%d/%Y")
-    q["product_n"]  = q["product"].astype(str).map(_normalize_txt)
-    q["is_organic"] = q["organic_int"].map(_as_bool_organic)
-    q["loc_n"]      = q["loc"].astype(str).map(_normalize_txt)
-    q["vendor_n"]   = q["vendor"].astype(str).map(_normalize_txt)
+SIZE_PATTERN = re.compile(r"(\d+\s?lb|\d+\s?ct|\d+\s?[xX]\s?\d+|bulk|jbo|xl|lg|med|fancy|4x4|4x5|5x5|60cs|15 lb|25 lb|2 layers?|layers?)", re.IGNORECASE)
+def _extract_size(s: str) -> str:
+    if not isinstance(s, str): return ""
+    m = SIZE_PATTERN.search(s)
+    return m.group(1).lower() if m else ""
 
-    q = q.dropna(subset=["q_date", "product_n", "price"])
+def _vendor_clean(s: str) -> str: return _normalize_txt(s)
+def _loc_clean(s: str) -> str: return _normalize_txt(s)
 
-    # Diagnóstico útil
-    st.caption(
-        f"Quotations: {len(q)} filas tras normalizar. Rango fechas: "
-        f"{q['q_date'].min().date() if not q.empty else '—'} → "
-        f"{q['q_date'].max().date() if not q.empty else '—'}"
-    )
+def _coerce_bool(x):
+    if isinstance(x, (bool, np.bool_)): return bool(x)
+    if x is None or (isinstance(x, float) and math.isnan(x)): return False
+    s = str(x).strip().lower()
+    if s in {"cv"}: return False
+    return s in {"true","t","1","yes","y","og","organic"}
 
-    return q[["q_date","product_n","is_organic","price","loc_n","vendor_n"]]
+# Si ya tienes PRODUCT_SYNONYMS y _canonical_product, usa los tuyos.
+PRODUCT_SYNONYMS = {
+    "round tomato": {"round tomato", "tomato round", "tomato rounds", "tomato", "vr round tomato", "1 layer vr round tomato", "1layer vr round tomato", "vr tomato round"},
+    "beef tomato": {"beef", "beef tomato", "beefsteak", "beef steak tomato"},
+    "kabocha": {"kabocha", "kabocha squash"},
+    "spaghetti": {"spaghetti", "spaghetti squash"},
+    "acorn": {"acorn", "acorn squash"},
+    "butter": {"butter", "butternut", "butternut squash"},
+    "eggplant": {"eggplant", "berenjena"},
+}
+def _build_reverse_synonyms(syno: dict[str, set]) -> dict[str, str]:
+    rev = {}
+    for canon, variants in syno.items():
+        for v in variants:
+            rev[_normalize_txt(v)] = canon
+    return rev
+REV_SYNONYMS = _build_reverse_synonyms(PRODUCT_SYNONYMS)
+def _canonical_product(txt: str) -> str:
+    n = _normalize_txt(txt)
+    if n in REV_SYNONYMS:
+        return REV_SYNONYMS[n]
+    for canon, variants in PRODUCT_SYNONYMS.items():
+        if any(_normalize_txt(v) in n for v in variants):
+            return canon
+    return n.split(" ")[0] if n else ""
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_sales_readonly() -> pd.DataFrame:
-    """
-    Lee ventas de tu tabla 'ventas_frutto' **sin escribir**.
-    Prioridad:
-      1) Supabase (st.secrets['supabase_sales'] con table='ventas_frutto')
-      2) MSSQL (st.secrets['mssql_sales']) -> opcional (no implementado aquí)
-    """
-    # 1) Supabase
-    sec = st.secrets.get("supabase_sales", {})
-    if create_client and sec:
-        sb = create_client(sec["url"], sec["anon_key"])
-        table_name = sec.get("table", "ventas_frutto")
-        rows, limit, offset = [], 5000, 0
-        # selecciona solo campos necesarios para rendimiento
-        cols = (
-            "reqs_date,product,organic,sale_location,lot_location,"
-            "customer,vendor,quantity,price_per_unit"
-        )
-        try:
+# ---- Smoke test de tabla (para detectar RLS/tabla vacía/permisos)
+def supabase_smoke_test(sb, table: str) -> dict:
+    if not sb: return {"ok": False, "error": "Sin cliente Supabase"}
+    try:
+        r = sb.table(table).select("*", count="exact").limit(1).execute()
+        return {"ok": True, "count_hint": r.count, "sample": (r.data or [None])[0]}
+    except Exception as e:
+        _errlog("Smoke test falló.", e)
+        return {"ok": False, "error": str(e)}
+
+# ---- Fetch con fallback según tipo de columna fecha
+def _fetch_range(sb, table: str, date_col: str, start_iso: str, end_iso: str, date_col_type: str, columns: str="*") -> pd.DataFrame:
+    rows, limit, offset = [], 5000, 0
+    try:
+        # Primer intento: ISO completo (UTC)
+        while True:
+            q = (sb.table(table).select(columns).gte(date_col, start_iso).lt(date_col, end_iso)
+                 .range(offset, offset + limit - 1).execute())
+            data = q.data or []
+            rows.extend(data)
+            if len(data) < limit: break
+            offset += limit
+
+        # Fallback si la col es DATE y no se trajo nada
+        if not rows and date_col_type == "date":
+            rows, limit, offset = [], 5000, 0
+            start_day, end_day = start_iso[:10], end_iso[:10]   # 'YYYY-MM-DD'
             while True:
-                resp = (
-                    sb.table(table_name)
-                      .select(cols)
-                      .range(offset, offset + limit - 1)
-                      .execute()
-                )
-                data = resp.data or []
+                q = (sb.table(table).select(columns).gte(date_col, start_day).lt(date_col, end_day)
+                     .range(offset, offset + limit - 1).execute())
+                data = q.data or []
                 rows.extend(data)
-                if len(data) < limit:
-                    break
+                if len(data) < limit: break
                 offset += limit
-        except Exception as e:
-            st.error(f"Error leyendo '{table_name}': {e}")
-            return pd.DataFrame()
-        df = pd.DataFrame(rows)
-    else:
-        # 2) MSSQL (opcional)
-        ms = st.secrets.get("mssql_sales", None)
-        if ms:
-            st.warning("Conector MSSQL no implementado en este snippet. Usa pyodbc/sqlalchemy en solo lectura.")
-            return pd.DataFrame()
-        else:
-            st.error("No se encontró fuente de ventas (st.secrets['supabase_sales'] o ['mssql_sales']).")
-            return pd.DataFrame()
+        return pd.DataFrame(rows)
+    except Exception as e:
+        _errlog("Error en _fetch_range.", e)
+        return pd.DataFrame()
 
+# ---- Normalización de ventas
+def _normalize_sales(df: pd.DataFrame, date_col_type: str) -> pd.DataFrame:
     if df.empty:
         return df
+    alias_map = {
+        "received_date": ["received_date", "reqs_date", "created_at", "sale_date"],
+        "product": ["product", "commoditie", "buyer_product"],
+        "organic": ["organic", "is_organic", "OG/CV"],
+        "unit": ["unit"],
+        "customer": ["customer", "client", "buyer"],
+        "vendor": ["vendor", "shipper", "supplier"],
+        "sale_location": ["sale_location", "lot_location"],
+        "quantity": ["quantity", "qty"],
+        "price_per_unit": ["price_per_unit", "price", "unit_price", "sell_price"],
+    }
+    std = {k: pd.Series([None]*len(df)) for k in alias_map}
+    for std_col, candidates in alias_map.items():
+        for c in candidates:
+            if c in df.columns:
+                std[std_col] = df[c]
+                break
+    sdf = pd.DataFrame(std)
 
-    # Normalización mínima según tu esquema
-    s = pd.DataFrame({
-        "date_str": df.get("reqs_date"),
-        "product": df.get("product"),
-        "organic": df.get("organic"),
-        "sale_location": df.get("sale_location"),
-        "lot_location": df.get("lot_location"),
-        "customer": df.get("customer"),
-        "vendor": df.get("vendor"),
-        "quantity": pd.to_numeric(df.get("quantity"), errors="coerce"),
-        "price_per_unit": pd.to_numeric(df.get("price_per_unit"), errors="coerce"),
-    })
-    s["date"] = pd.to_datetime(s["date_str"], errors="coerce")  # reqs_date ya es fecha base
-    s["product_n"] = s["product"].astype(str).map(_normalize_txt)
-    s["is_organic"] = s["organic"].map(_as_bool_organic)
-    s["loc_n"] = s["sale_location"].fillna(s["lot_location"]).astype(str).map(_normalize_txt)
-    s["customer_n"] = s["customer"].astype(str).map(_normalize_txt)
-    s["vendor_n"] = s["vendor"].astype(str).map(_normalize_txt)
+    # Parse fecha según tipo
+    if date_col_type == "date":
+        dt_col = pd.to_datetime(sdf["received_date"], errors="coerce")
+        sdf["date"] = dt_col  # naive, día local
+    else:
+        dt_col = pd.to_datetime(sdf["received_date"], errors="coerce", utc=True)
+        sdf["date"] = dt_col.dt.tz_convert("America/Bogota").dt.tz_localize(None)
 
-    s = s.dropna(subset=["date", "product_n"])
-    return s[[
-        "date","product_n","is_organic","loc_n","customer_n","vendor_n","quantity","price_per_unit"
-    ]]
+    sdf["is_organic"]     = sdf["organic"].apply(_coerce_bool)
+    sdf["product_raw"]    = sdf["product"].astype(str)
+    sdf["product_canon"]  = sdf["product_raw"].apply(_canonical_product)
+    sdf["size_std"]       = sdf["unit"].astype(str).apply(_extract_size)
+    sdf["customer_c"]     = sdf["customer"].astype(str).apply(_normalize_txt)
+    sdf["vendor_c"]       = sdf["vendor"].astype(str).apply(_vendor_clean)
+    sdf["loc_c"]          = sdf["sale_location"].astype(str).apply(_loc_clean)
+    sdf["quantity"]       = pd.to_numeric(sdf["quantity"], errors="coerce")
+    sdf["price_per_unit"] = pd.to_numeric(sdf["price_per_unit"], errors="coerce")
 
-# ------------------------
-# UI: parámetros
-# ------------------------
-with st.sidebar:
-    st.markdown("### ⚙️ Parámetros (solo lectura)")
-    # fecha del daily sheet (por defecto: ayer Bogotá)
-    bogota_today = (dt.datetime.utcnow() + dt.timedelta(hours=-5)).date()
-    default_qday = bogota_today - dt.timedelta(days=1)
-    q_day = st.date_input("Fecha de cotizaciones", value=default_qday, key="q_day_match")
+    cols = ["date","is_organic","product_raw","product_canon","size_std",
+            "customer_c","vendor_c","loc_c","quantity","price_per_unit"]
+    return sdf[cols]
 
-    recent_days = st.slider("Ventas recientes (benchmark) — días", 7, 60, 30, 1)
-    active_days = st.slider("Actividad cliente/producto — días", 7, 30, 14, 1)
-    only_active_vendors = st.checkbox("Solo vendors que han vendido en últimos 30 días", value=False)
+# ---- FUNCIÓN PRINCIPAL: recent, bench y familiaridad (con diagnósticos)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sales_recent_and_bench(days_recent: int, days_bench: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    sb = _load_supabase_client("supabase_sales")
+    if not sb:
+        st.error("No se encontró fuente de ventas (supabase_sales). Revisa secrets y dependencias.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# ------------------------
-# Pipeline: cargar y filtrar
-# ------------------------
-qdf = load_quotations_from_supabase()
-sdf = load_sales_readonly()
+    sec = st.secrets.get("supabase_sales", {})
+    table = sec.get("table", "sales")
+    date_col = sec.get("date_col", "received_date")
+    date_col_type = sec.get("date_col_type", "timestamp")  # "timestamp" | "date"
 
-colA, colB = st.columns(2)
-with colA: st.metric("Cotizaciones (total)", len(qdf))
-with colB: st.metric("Ventas (total)", len(sdf))
-if qdf.empty or sdf.empty:
-    st.stop()
+    # Smoke test temprano para detectar RLS/permisos
+    smoke = supabase_smoke_test(sb, table)
+    if not smoke.get("ok", False):
+        st.error("Supabase smoke test falló. Verifica RLS/permisos/tabla.")
+        _errlog("Smoke test no OK.", Exception(smoke.get("error")))
+    else:
+        # count_hint puede ser None si la política no permite COUNT
+        st.caption(f"🔌 Conexión OK. count_hint={smoke.get('count_hint')} sample_keys={list((smoke.get('sample') or {}).keys())[:5]}")
 
-# Cotizaciones del día elegido
-qdf_day = qdf[qdf["q_date"].dt.date == pd.to_datetime(q_day).date()].copy()
-st.write(f"**Cotizaciones del {q_day}:** {len(qdf_day)}")
-if qdf_day.empty:
-    st.info("No hay cotizaciones para la fecha seleccionada.")
-    st.stop()
+    # Rangos
+    r_start, r_end = utc_bounds_days_back(days_recent)
+    b_start, b_end = utc_bounds_days_back(days_bench)
+    f_start, f_end = utc_bounds_days_back(max(days_recent, days_bench, 90))
 
-# (Opcional) vendors activos
-if only_active_vendors:
-    cutoff_v = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=30)
-    vend_act = sdf.loc[sdf["date"] >= cutoff_v, "vendor_n"].dropna().unique().tolist()
-    qdf_day = qdf_day[qdf_day["vendor_n"].isin(vend_act)].copy()
-    st.caption(f"Filtrando a {len(vend_act)} vendors activos (30 días). Cotizaciones día después del filtro: {len(qdf_day)}")
+    # Fetch
+    df_recent = _fetch_range(sb, table, date_col, r_start, r_end, date_col_type)
+    df_bench  = _fetch_range(sb, table, date_col, b_start, b_end, date_col_type)
+    df_fam    = _fetch_range(sb, table, date_col, f_start, f_end, date_col_type, columns="customer,vendor")
 
-# Compras recientes por cliente+producto (actividad) en ventana active_days
-cutoff_recent = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=active_days)
-s_recent = sdf.loc[sdf["date"] >= cutoff_recent].copy()
-recent_buys = (
-    s_recent.groupby(["customer_n","product_n","is_organic"], dropna=False)
-    .agg(qty_recent=("quantity","sum"), last_buy=("date","max"))
-    .reset_index()
-)
+    # Normaliza (recent/bench)
+    sdf_recent = _normalize_sales(df_recent, date_col_type)
+    sdf_bench  = _normalize_sales(df_bench,  date_col_type)
 
-# Benchmark por cliente+producto exacto (ventana recent_days)
-cutoff_bench = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=recent_days)
-s_bench = sdf.loc[sdf["date"] >= cutoff_bench].copy()
-bench = (
-    s_bench.groupby(["customer_n","product_n","is_organic"], dropna=False)["price_per_unit"]
-    .median()
-    .rename("bench_price")
-    .reset_index()
-)
+    return sdf_recent, sdf_bench, df_fam
 
-# ------------------------
-# Match: por product exacto + OG/CV; ubicación suave
-# ------------------------
-# Ubicaciones históricas vistas para cada (cliente, producto)
-cust_prod_locs = (
-    sdf.groupby(["customer_n","product_n","is_organic","loc_n"], dropna=False)
-    .size().reset_index(name="n")
-)[["customer_n","product_n","is_organic","loc_n"]]
-
-# Candidatos: (cliente,producto) recientes x cotizaciones del día del mismo producto/OG
-candidates = (
-    recent_buys.merge(qdf_day, how="inner", on=["product_n","is_organic"])
-               .merge(cust_prod_locs, how="left", on=["customer_n","product_n","is_organic"])
-)
-
-if candidates.empty:
-    st.warning("No hay empates (cliente+producto recientes) con las cotizaciones del día.")
-    st.stop()
-
-# Score por cercanía de ubicación
-# tras el merge, loc_n_x viene del histórico (cust_prod_locs), loc_n_y viene de qdf_day
-candidates["loc_match"] = candidates.apply(lambda r: _loc_match_soft(r.get("loc_n_y"), r.get("loc_n_x")), axis=1)
-candidates = candidates.rename(columns={"loc_n_x":"loc_hist","loc_n_y":"loc_quote"})
-
-# Adjuntamos benchmark por cliente+producto
-candidates = candidates.merge(bench, how="left", on=["customer_n","product_n","is_organic"])
-
-# price_improvement y score
-def _price_improv(row):
-    bp, pq = row.get("bench_price"), row.get("price")
-    if pd.notnull(bp) and bp > 0 and pd.notnull(pq):
-        return (bp - pq) / bp
-    return np.nan
-
-candidates["price_improvement"] = candidates.apply(_price_improv, axis=1)
-
-# Score final: precio (peso 1.0) + ubicación (0.3)
-candidates["score"] = candidates["price_improvement"].fillna(0.0) + 0.3 * candidates["loc_match"].fillna(0.0)
-
-# Orden y columnas
-out = candidates[[
-    "customer_n","product_n","is_organic","vendor_n","loc_quote","price",
-    "bench_price","price_improvement","score","qty_recent","last_buy","loc_hist"
-]].copy()
-
-out = out.sort_values(["customer_n","product_n","score","price"], ascending=[True, True, False, True])
-
-# ------------------------
-# Mostrar resultados
-# ------------------------
-st.markdown("### 📋 Ofertas candidatas por cliente + producto (día seleccionado)")
-if out.empty:
-    st.info("Sin resultados bajo los filtros actuales.")
-else:
-    out_show = out.copy()
-    out_show["OG/CV"] = np.where(out_show["is_organic"], "OG", "CV")
-    out_show = out_show.drop(columns=["is_organic"])
-    # Formatos
-    st.dataframe(
-        out_show.rename(columns={
-            "customer_n":"customer","product_n":"product","vendor_n":"vendor",
-            "loc_quote":"location_quote","loc_hist":"location_hist"
-        }).style.format({
-            "price":"${:,.2f}",
-            "bench_price":"${:,.2f}",
-            "price_improvement":"{:.1%}",
-            "score":"{:.3f}"
+# ---- PANEL DE DIAGNÓSTICO (llámalo donde cargas datos)
+def render_sales_diagnostics(days_recent: int, days_bench: int, sdf_recent: pd.DataFrame, sdf_bench: pd.DataFrame, df_fam: pd.DataFrame):
+    with st.expander("🔎 Diagnóstico de conexión y datos (Sales)", expanded=False):
+        sec = st.secrets.get("supabase_sales", {})
+        st.write("**Secrets presentes:**", list(st.secrets.keys()))
+        st.json({
+            "url": sec.get("url"), 
+            "table": sec.get("table","sales"),
+            "date_col": sec.get("date_col","received_date"),
+            "date_col_type": sec.get("date_col_type","timestamp"),
         })
-    )
 
-    # Descarga CSV
-    csv = out_show.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Descargar CSV (match día)", data=csv, file_name=f"match_cotizaciones_{q_day}.csv", mime="text/csv")
+        r_start, r_end = utc_bounds_days_back(days_recent)
+        b_start, b_end = utc_bounds_days_back(days_bench)
+        st.write("**Recent (UTC)**:", r_start, "→", r_end)
+        st.write("**Bench  (UTC)**:", b_start, "→", b_end)
 
-# Diagnóstico rápido
-with st.expander("🔬 Diagnóstico (inputs normalizados)"):
-    st.write("Cotizaciones (día):", qdf_day.head(20))
-    st.write("Compras recientes (cliente+producto):", recent_buys.head(20))
-    st.write("Benchmark (cliente+producto):", bench.head(20))
+        st.write(f"Rows recent: {len(sdf_recent)} | Rows bench: {len(sdf_bench)} | Rows fam: {len(df_fam)}")
+        if len(sdf_recent) == 0:
+            st.warning("⚠️ 'recent' vacío: revisa 'date_col', 'date_col_type' y RLS. Si la col es DATE, usa 'date_col_type = \"date\"' en secrets.")
+        if len(sdf_bench) == 0:
+            st.info("ℹ️ 'bench' vacío: puede ser normal si no hay ventas en esa ventana.")
+
+        if not sdf_recent.empty:
+            st.write("**recent.head():**")
+            st.dataframe(sdf_recent.head())
+            if "date" in sdf_recent.columns:
+                st.write("recent date min/max:", str(sdf_recent["date"].min()), "→", str(sdf_recent["date"].max()))
+        if not sdf_bench.empty:
+            st.write("**bench.head():**")
+            st.dataframe(sdf_bench.head())
+
+        # Muestra errores acumulados
+        errs = st.session_state.get("_sales_errors", [])
+        if errs:
+            st.error("Registro de errores:")
+            for e in errs:
+                st.write(e)
+        else:
+            st.success("Sin errores registrados en el loader 🎯")
+# =================== FIN DROP-IN ===================
