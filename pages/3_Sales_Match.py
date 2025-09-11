@@ -10,6 +10,15 @@ from typing import List, Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
 import streamlit as st
+# ✅ 1) Login obligatorio antes de cargar nada pesado
+from simple_auth import ensure_login, logout_button
+
+user = ensure_login()   # Si no hay sesión, este call debe bloquear la página (st.stop)
+with st.sidebar:
+    logout_button()
+
+# (Opcional) mostrar quién es el usuario activo en la UI
+st.caption(f"Sesión: {user}")
 
 # --- Opcionales no-críticos ---
 try:
