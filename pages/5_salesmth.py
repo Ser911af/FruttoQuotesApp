@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 import streamlit as st
+
 # ✅ 1) Login obligatorio antes de cargar nada pesado
 from simple_auth import ensure_login, logout_button
 
