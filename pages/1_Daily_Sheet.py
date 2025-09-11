@@ -2,6 +2,15 @@ import streamlit as st
 import pandas as pd
 import os
 import re
+# ✅ 1) Login obligatorio antes de cargar nada pesado
+from simple_auth import ensure_login, logout_button
+
+user = ensure_login()   # Si no hay sesión, este call debe bloquear la página (st.stop)
+with st.sidebar:
+    logout_button()
+
+# (Opcional) mostrar quién es el usuario activo en la UI
+st.caption(f"Sesión: {user}")
 
 # ---- Altair opcional (con detección) ----
 try:
