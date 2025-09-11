@@ -2,17 +2,18 @@ import streamlit as st
 import pandas as pd
 import os
 import re
-# ✅ 1) Login obligatorio antes de cargar nada pesado
+
+# ✅ 1) Mandatory login before loading anything heavy
 from simple_auth import ensure_login, logout_button
 
-user = ensure_login()   # Si no hay sesión, este call debe bloquear la página (st.stop)
+user = ensure_login()   # If there’s no session, this call should block the page (st.stop)
 with st.sidebar:
     logout_button()
 
-# (Opcional) mostrar quién es el usuario activo en la UI
-st.caption(f"Sesión: {user}")
+# (Optional) show current user in the UI
+st.caption(f"Session: {user}")
 
-# ---- Altair opcional (con detección) ----
+# ---- Optional Altair (with detection) ----
 try:
     import altair as alt
     ALTAIR_OK = True
@@ -21,14 +22,14 @@ except Exception:
 
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
-# ---- Versión visible para confirmar despliegue ----
-VERSION = "Daily_Sheet v2025-09-09 - credenciales por secciones (supabase_quotes) + Volume"
+# ---- Visible version tag to confirm deployment ----
+VERSION = "Daily_Sheet v2025-09-09 — section-based credentials (supabase_quotes) + Volume"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
 
 # ------------------------
-# Helpers (parsing y formateo)
+# Helpers (parsing & formatting)
 # ------------------------
 _size_regex = re.compile(
     r"(\d+\s?lb|\d+\s?ct|\d+\s?[xX]\s?\d+|bulk|jbo|xl|lg|med|fancy|4x4|4x5|5x5|60cs)",
@@ -42,15 +43,15 @@ def _size_from_product(p: str) -> str:
     return m.group(1) if m else ""
 
 def _choose_size(row) -> str:
-    # 1) Prioriza size_text (talla/grade original)
+    # 1) Prioritize size_text (original grade/size)
     stxt = row.get("size_text")
     if isinstance(stxt, str) and stxt.strip():
         return stxt.strip()
-    # 2) Fallback legacy: volume_standard
+    # 2) Legacy fallback: volume_standard
     vs = row.get("volume_standard")
     if isinstance(vs, str) and vs.strip():
         return vs.strip()
-    # 3) Último recurso: inferir desde Product
+    # 3) Last resort: infer from Product
     return _size_from_product(row.get("Product", ""))
 
 def _ogcv(x) -> str:
@@ -59,6 +60,7 @@ def _ogcv(x) -> str:
         return "OG" if xi == 1 else "CV" if xi == 0 else ""
     except Exception:
         s = str(x).strip().lower()
+        # Keep generous mapping to handle mixed inputs
         return "OG" if s in ("organic","org","1","true","sí","si","yes","y") else \
                "CV" if s in ("conventional","conv","0","false","no","n") else ""
 
@@ -97,21 +99,21 @@ def _norm_name(x: str) -> str:
     return s[:1].upper() + s[1:].lower() if s else s
 
 # ------------------------
-# Supabase helpers (por secciones)
+# Supabase helpers (by sections)
 # ------------------------
 def _read_section(section_name: str) -> dict:
     """
-    Lee una sección de st.secrets (p.ej. 'supabase_quotes') y valida claves mínimas.
-    Espera:
-      url, anon_key, table (def: quotations), schema (def: public)
+    Reads a section from st.secrets (e.g., 'supabase_quotes') and validates minimal keys.
+    Expects:
+      url, anon_key, table (default: quotations), schema (default: public)
     """
     try:
         sec = st.secrets[section_name]
     except Exception:
-        raise KeyError(f"No encontré la sección '{section_name}' en st.secrets.")
+        raise KeyError(f"Section '{section_name}' not found in st.secrets.")
     for k in ("url", "anon_key"):
         if k not in sec or not str(sec[k]).strip():
-            raise KeyError(f"'{k}' ausente o vacío en st.secrets['{section_name}'].")
+            raise KeyError(f"Missing or empty '{k}' in st.secrets['{section_name}'].")
     sec = dict(sec)
     sec["table"] = sec.get("table", "").strip() or "quotations"
     sec["schema"] = sec.get("schema", "").strip() or "public"
@@ -121,28 +123,28 @@ def _create_client(url: str, key: str):
     try:
         from supabase import create_client
     except Exception as e:
-        raise ImportError(f"Falta 'supabase' en requirements.txt: {e}")
+        raise ImportError(f"'supabase' is missing in requirements.txt: {e}")
     return create_client(url, key)
 
 def _sb_table(sb, schema: str, table: str):
-    """Devuelve un handle a la tabla respetando el schema si el cliente lo soporta."""
+    """Returns a table handle respecting schema if the client supports it."""
     try:
         return sb.schema(schema).table(table)  # supabase-py v2+
     except Exception:
         return sb.table(table)                 # fallback v1
 
 # ------------------------
-# Data fetch (Supabase - usa sección supabase_quotes)
+# Data fetch (Supabase — uses section supabase_quotes)
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_quotations_from_supabase():
-    """Trae quotations paginado desde la sección [supabase_quotes]."""
+    """Fetch quotations in pages using the [supabase_quotes] section."""
     try:
         cfg = _read_section("supabase_quotes")
         sb = _create_client(cfg["url"], cfg["anon_key"])
         tbl = _sb_table(sb, cfg["schema"], cfg["table"])
     except Exception as e:
-        st.error(f"Config/cliente Supabase inválido: {e}")
+        st.error(f"Invalid Supabase config/client: {e}")
         return pd.DataFrame()
 
     frames, page_size = [], 1000
@@ -159,7 +161,7 @@ def fetch_all_quotations_from_supabase():
                 .execute()
             )
         except Exception as e:
-            st.error(f"Error consultando Supabase: {e}")
+            st.error(f"Error querying Supabase: {e}")
             return pd.DataFrame()
 
         rows = getattr(resp, "data", None) or []
@@ -173,7 +175,7 @@ def fetch_all_quotations_from_supabase():
     if df.empty:
         return df
 
-    # Normalización mínima
+    # Minimal normalization
     df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
@@ -192,71 +194,71 @@ def fetch_all_quotations_from_supabase():
 # ------------------------
 st.title("Daily Sheet")
 
-# Logo centrado + utilidades
+# Centered logo + utilities
 colA, colB, colC = st.columns([1, 2, 1])
 with colB:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, use_container_width=True)
     else:
-        st.info("Logo no encontrado. Verifica 'data/Asset 7@4x.png'.")
+        st.info("Logo not found. Check 'data/Asset 7@4x.png'.")
 
 cc1, cc2 = st.columns(2)
 with cc1:
-    if st.button("🧹 Limpiar caché de datos"):
+    if st.button("🧹 Clear data cache"):
         st.cache_data.clear()
-        st.success("Caché limpiada. Vuelve a cargar la página o usa 'Forzar recarga'.")
+        st.success("Cache cleared. Reload the page or use 'Force rerun'.")
 with cc2:
-    if st.button("🔄 Forzar recarga (rerun)"):
+    if st.button("🔄 Force rerun"):
         st.rerun()
 
 df = fetch_all_quotations_from_supabase()
 
 if df.empty:
-    st.info("Sin datos disponibles desde Supabase por ahora.")
-    st.caption("Página en construcción — pronto agregamos la vista del día.")
+    st.info("No data available from Supabase yet.")
+    st.caption("Page under construction — day view coming soon.")
     st.stop()
 
-# Columna fecha normalizada
+# Normalized date column
 df["_date"] = pd.to_datetime(df["cotization_date"], errors="coerce").dt.date
 valid_dates = df["_date"].dropna()
 if valid_dates.empty:
-    st.warning("No se pudo interpretar ninguna fecha en 'cotization_date'.")
+    st.warning("Could not parse any date in 'cotization_date'.")
     st.stop()
 
-# Selector de fecha en formato mm/dd/yyyy
+# Date selector in mm/dd/yyyy
 default_date = max(valid_dates)
-sel_date = st.date_input("Fecha a mostrar", value=default_date, format="MM/DD/YYYY")
+sel_date = st.date_input("Date to display", value=default_date, format="MM/DD/YYYY")
 
-# Subset del día
+# Day subset
 day_df = df[df["_date"] == sel_date].copy()
 if day_df.empty:
-    st.warning("No hay cotizaciones para la fecha seleccionada.")
+    st.warning("No quotations for the selected date.")
     st.stop()
 
-# Campos derivados
+# Derived fields
 day_df["Shipper"] = day_df["VendorClean"]
 day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
 day_df["Where"]   = day_df["Location"]
 day_df["Size"]    = day_df.apply(_choose_size, axis=1)
-day_df["Volume"]  = day_df.apply(_volume_str, axis=1)   # ← Nombre final sin '?'
+day_df["Volume"]  = day_df.apply(_volume_str, axis=1)   # ← Final display name
 day_df["Price$"]  = day_df["Price"].apply(_format_price)
 day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
-# ---------- Filtros de la vista del día ----------
+# ---------- Day view filters ----------
 cols = st.columns(4)
 with cols[0]:
     product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
-    sel_products = st.multiselect("Productos (disponibles)", options=product_options, default=product_options)
+    sel_products = st.multiselect("Products (available)", options=product_options, default=product_options)
 with cols[1]:
     locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
-    sel_locs = st.multiselect("Ubicaciones", options=locs, default=locs)
+    sel_locs = st.multiselect("Locations", options=locs, default=locs)
 with cols[2]:
-    search = st.text_input("Buscar producto (contiene)", "")
+    search = st.text_input("Search product (contains)", "")
 with cols[3]:
-    sort_opt = st.selectbox("Ordenar por", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
+    sort_opt = st.selectbox("Sort by", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
 
-# ---- Aplicar filtros ----
+# ---- Apply filters ----
 if sel_products:
     day_df = day_df[day_df["Product"].isin(sel_products)]
 if sel_locs:
@@ -265,7 +267,7 @@ if search.strip():
     s = search.strip().lower()
     day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
 
-# Orden
+# Ordering
 if sort_opt == "Price (asc)":
     day_df = day_df.sort_values("Price", ascending=True)
 elif sort_opt == "Price (desc)":
@@ -273,12 +275,12 @@ elif sort_opt == "Price (desc)":
 else:
     day_df = day_df.sort_values(sort_opt)
 
-# ---------- Modo edición (Size edita size_text) ----------
+# ---------- Edit mode (Size edits size_text) ----------
 st.divider()
 edit_mode = st.toggle(
-    "✏️ Modo edición (todo excepto fecha)",
+    "✏️ Edit mode (everything except date)",
     value=False,
-    help="Edita Shipper, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. La fecha permanece bloqueada."
+    help="Edit Shipper, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. Date is locked."
 )
 
 if edit_mode:
@@ -290,7 +292,7 @@ if edit_mode:
     edit_df = edit_df.rename(columns={
         "VendorClean": "Shipper",
         "Location": "Where",
-        "size_text": "Size",     # UI muestra "Size" pero se guarda en size_text
+        "size_text": "Size",     # UI shows "Size" but persists to size_text
         "Organic": "organic",
         "Price": "price",
     })
@@ -308,7 +310,7 @@ if edit_mode:
         "volume_unit": st.column_config.TextColumn("Volume Unit"),
     }
 
-    st.caption("Edita los campos y presiona **Guardar cambios**.")
+    st.caption("Edit the fields and click **Save changes**.")
     edited_df = st.data_editor(
         edit_df,
         key="editor_all",
@@ -318,7 +320,7 @@ if edit_mode:
         column_order=["id","cotization_date","Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]
     )
 
-    if st.button("💾 Guardar cambios", type="primary", use_container_width=True):
+    if st.button("💾 Save changes", type="primary", use_container_width=True):
         ORIG = edit_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
         NEW  = edited_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
 
@@ -326,13 +328,13 @@ if edit_mode:
         dirty_ids = NEW.index[changed_mask.any(axis=1)].tolist()
 
         if not dirty_ids:
-            st.success("No hay cambios por guardar.")
+            st.success("No changes to save.")
         else:
             payload = []
             for _id in dirty_ids:
                 ui_row = NEW.loc[_id].to_dict()
 
-                # Tipos
+                # Types
                 for k in ["price", "volume_num"]:
                     v = ui_row.get(k)
                     try:
@@ -345,7 +347,7 @@ if edit_mode:
                 except Exception:
                     pass
 
-                # UI -> BD
+                # UI -> DB
                 db_row = {
                     "vendorclean": ui_row.get("Shipper"),
                     "location": ui_row.get("Where"),
@@ -370,10 +372,10 @@ if edit_mode:
                     _id = item.pop("id")
                     tbl.update(item).eq("id", _id).execute()
 
-                st.success(f"Se actualizaron {len(payload)} registro(s). 🎉")
+                st.success(f"Updated {len(payload)} record(s). 🎉")
                 st.balloons()
 
-                # Refrescar day_df local
+                # Refresh local day_df
                 upd = NEW.loc[dirty_ids].reset_index()
                 upd = upd.rename(columns={
                     "Shipper":"VendorClean",
@@ -387,7 +389,7 @@ if edit_mode:
                         if col in r and pd.notna(r[col]):
                             day_df.loc[mask, col] = r[col]
 
-                # Derivadas:
+                # Derivatives:
                 day_df["Shipper"] = day_df["VendorClean"]
                 day_df["Where"]   = day_df["Location"]
                 day_df["Price$"]  = day_df["Price"].apply(_format_price)
@@ -395,120 +397,120 @@ if edit_mode:
                 day_df["Volume"]  = day_df.apply(_volume_str, axis=1)
 
             except Exception as e:
-                st.error(f"Error al guardar cambios: {e}")
+                st.error(f"Error saving changes: {e}")
 
-# ---------- Vista de la tabla (solo lectura bonita) ----------
+# ---------- Read-only pretty table ----------
 show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume","Price$", "Family"]].reset_index(drop=True)
 st.dataframe(show, use_container_width=True)
 
-# Descarga CSV con fecha formateada
+# CSV download with formatted date
 csv_bytes = show.to_csv(index=False).encode("utf-8")
 st.download_button(
-    "⬇️ Descargar CSV (vista del día)",
+    "⬇️ Download CSV (day view)",
     data=csv_bytes,
     file_name=f"daily_sheet_{sel_date.strftime('%m-%d-%Y')}.csv",
     mime="text/csv"
 )
 
 # =========================
-# 📊 Visualizaciones (BASADAS en la tabla visible)
+# 📊 Visualizations (BASED on the visible table)
 # =========================
-st.markdown("## 📊 Visualizaciones (tabla actual)")
+st.markdown("## 📊 Visualizations (current table)")
 
 if not ALTAIR_OK:
-    st.warning("Altair no está instalado. Agrega `altair>=5` a requirements.txt y reinicia la app.")
+    st.warning("Altair is not installed. Add `altair>=5` to requirements.txt and restart the app.")
 else:
     viz_day = day_df.copy()
 
     if viz_day.empty:
-        st.info("No hay datos en la tabla actual para graficar.")
+        st.info("There are no rows in the current table to plot.")
     else:
         viz_day["price_num"] = pd.to_numeric(viz_day["Price"], errors="coerce")
         viz_day["volume_num"] = pd.to_numeric(viz_day["volume_num"], errors="coerce")
         viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
         viz_day["Shipper_norm"] = viz_day["Shipper"].apply(_norm_name)
 
-        # ---- KPIs rápidos (de lo visible) ----
+        # ---- Quick KPIs (from visible rows) ----
         c_k1, c_k2, c_k3, c_k4 = st.columns(4)
         with c_k1:
             mean_price = viz_day["price_num"].mean()
-            st.metric("Precio promedio (tabla)", f"{mean_price:.2f}" if pd.notna(mean_price) else "—")
+            st.metric("Average price (table)", f"{mean_price:.2f}" if pd.notna(mean_price) else "—")
         with c_k2:
             min_price = viz_day["price_num"].min()
-            st.metric("Precio mínimo (tabla)", f"{min_price:.2f}" if pd.notna(min_price) else "—")
+            st.metric("Min price (table)", f"{min_price:.2f}" if pd.notna(min_price) else "—")
         with c_k3:
             max_price = viz_day["price_num"].max()
-            st.metric("Precio máximo (tabla)", f"{max_price:.2f}" if pd.notna(max_price) else "—")
+            st.metric("Max price (table)", f"{max_price:.2f}" if pd.notna(max_price) else "—")
         with c_k4:
-            st.metric("Ofertas visibles", f"{len(viz_day)}")
+            st.metric("Visible offers", f"{len(viz_day)}")
 
-        # ---- 1) Precio promedio por ubicación (barras) ----
+        # ---- 1) Average price by location (bars) ----
         g_loc = (viz_day.groupby("Where_norm", as_index=False)
                         .agg(avg_price=("price_num","mean"),
                              offers=("Where_norm","count")))
         if not g_loc.empty:
             chart_loc = alt.Chart(g_loc).mark_bar().encode(
-                x=alt.X("avg_price:Q", title="Precio promedio"),
-                y=alt.Y("Where_norm:N", sort="-x", title="Ubicación"),
+                x=alt.X("avg_price:Q", title="Average price"),
+                y=alt.Y("Where_norm:N", sort="-x", title="Location"),
                 tooltip=["Where_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Precio promedio por ubicación (según tabla)", height=320)
+            ).properties(title="Average price by location (visible table)", height=320)
             st.altair_chart(chart_loc, use_container_width=True)
 
-        # ---- 2) Precio promedio por shipper (barras) ----
+        # ---- 2) Average price by shipper (bars) ----
         g_ship = (viz_day.groupby("Shipper_norm", as_index=False)
                          .agg(avg_price=("price_num","mean"),
                               offers=("Shipper_norm","count")))
         if not g_ship.empty:
             chart_ship = alt.Chart(g_ship).mark_bar().encode(
-                x=alt.X("avg_price:Q", title="Precio promedio"),
+                x=alt.X("avg_price:Q", title="Average price"),
                 y=alt.Y("Shipper_norm:N", sort="-x", title="Shipper"),
                 tooltip=["Shipper_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Precio promedio por shipper (según tabla)", height=350)
+            ).properties(title="Average price by shipper (visible table)", height=350)
             st.altair_chart(chart_ship, use_container_width=True)
 
-        # ---- 3) Volumen por shipper (barras) ----
+        # ---- 3) Volume by shipper (bars) ----
         g_vol = (viz_day.groupby("Shipper_norm", as_index=False)
                         .agg(total_volume=("volume_num","sum")))
         g_vol = g_vol[g_vol["total_volume"].fillna(0) > 0]
         if not g_vol.empty:
             chart_vol = alt.Chart(g_vol).mark_bar().encode(
-                x=alt.X("total_volume:Q", title="Volumen total"),
+                x=alt.X("total_volume:Q", title="Total volume"),
                 y=alt.Y("Shipper_norm:N", sort="-x", title="Shipper"),
                 tooltip=["Shipper_norm:N", alt.Tooltip("total_volume:Q", format=",.0f")]
-            ).properties(title="Volumen por shipper (según tabla)", height=350)
+            ).properties(title="Volume by shipper (visible table)", height=350)
             st.altair_chart(chart_vol, use_container_width=True)
 
-        # ---- 4) Precio promedio por producto (barras) ----
+        # ---- 4) Average price by product (bars) ----
         g_prod = (viz_day.groupby("Product", as_index=False)
                           .agg(avg_price=("price_num","mean"),
                                offers=("Product","count")))
         if not g_prod.empty and g_prod["Product"].nunique() > 1:
             chart_prod = alt.Chart(g_prod).mark_bar().encode(
-                x=alt.X("avg_price:Q", title="Precio promedio"),
-                y=alt.Y("Product:N", sort="-x", title="Producto"),
+                x=alt.X("avg_price:Q", title="Average price"),
+                y=alt.Y("Product:N", sort="-x", title="Product"),
                 tooltip=["Product:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Precio promedio por producto (según tabla)", height=350)
+            ).properties(title="Average price by product (visible table)", height=350)
             st.altair_chart(chart_prod, use_container_width=True)
 
-        # ---- 5) Scatter Precio vs Volumen (outliers) ----
+        # ---- 5) Scatter Price vs Volume (outliers) ----
         if viz_day["volume_num"].fillna(0).sum() > 0:
             scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
-                x=alt.X("price_num:Q", title="Precio"),
-                y=alt.Y("volume_num:Q", title="Volumen"),
+                x=alt.X("price_num:Q", title="Price"),
+                y=alt.Y("volume_num:Q", title="Volume"),
                 tooltip=["Product","Shipper_norm","Where_norm",
                          alt.Tooltip("price_num:Q", format=".2f"),
                          alt.Tooltip("volume_num:Q", format=",.0f")]
-            ).properties(title="Precio vs Volumen (según tabla)", height=320)
+            ).properties(title="Price vs Volume (visible table)", height=320)
             st.altair_chart(scatter, use_container_width=True)
 
-        # ---- 6) Tabla de extremos ----
-        with st.expander("🔎 Ver extremos de precio (tabla visible)"):
+        # ---- 6) Extremes table ----
+        with st.expander("🔎 View price extremes (visible table)"):
             tmp = viz_day[["Product","Shipper","Where","price_num","Volume"]].dropna(subset=["price_num"]).copy()
             tmp = tmp.sort_values("price_num")
             c1, c2 = st.columns(2)
             with c1:
-                st.write("**Bottom 5 (más baratos)**")
+                st.write("**Bottom 5 (cheapest)**")
                 st.dataframe(tmp.head(5).rename(columns={"price_num":"Price"}), use_container_width=True)
             with c2:
-                st.write("**Top 5 (más caros)**")
+                st.write("**Top 5 (most expensive)**")
                 st.dataframe(tmp.tail(5).rename(columns={"price_num":"Price"}), use_container_width=True)
