@@ -6,7 +6,7 @@ def ensure_login() -> str:
     user = st.session_state.get("user")
     if not user:
         st.warning("Debes iniciar sesión en Home antes de acceder a esta página.")
-        st.page_link("🏠_Home.py", label="Ir al Home")
+        st.page_link("🏠_Home.py", label="Home")
         st.stop()
     return user
 
