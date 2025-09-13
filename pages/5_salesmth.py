@@ -1,9 +1,10 @@
-# pages/4_newmatch.py
+# pages/5_salesmth.py
 # 🧩 Sales Match — Vendor Recommender (UI simplificada + comparador de precios + resumen por Sales Rep)
-# - Enfoque didáctico: explica el uso, métricas claras, y menos fricción.
-# - Comparación directa: cotización vs venta (spread y %).
-# - Resumen de últimos deals por representante de ventas (si existe columna).
-# - Mantiene tus funciones base; refactor menor y tabs para navegación mental.
+# - UI en tabs: Resumen / Ofertas / Comparar / Reps / Actividad / Ayuda
+# - Comparación directa: cotización vs venta (spread y %)
+# - Resumen de últimos deals por representante (si la columna existe)
+# - SIN matplotlib: se usa column_config de Streamlit para estilos seguros en cloud
+# - Timezone Bogotá por defecto
 
 import os
 import re
@@ -23,8 +24,6 @@ with st.sidebar:
     logout_button()
 
 st.set_page_config(page_title="Sales Match — Vendor Recommender", page_icon="🧩", layout="wide")
-
-# (Opcional) mostrar usuario
 st.caption(f"Sesión: {user}")
 
 # (Opcional) Supabase
@@ -194,7 +193,7 @@ def load_sales() -> pd.DataFrame:
     else:
         ms = st.secrets.get("mssql_sales", None)
         if ms:
-            st.warning("Loader MSSQL no implementado aquí por brevedad. Usa sqlalchemy/pyodbc y devuélveme un DataFrame.")
+            st.warning("Loader MSSQL no implementado aquí por brevedad. Usa sqlalchemy/pyodbc y devolvé un DataFrame.")
             return pd.DataFrame()
         else:
             st.error("No se encontró fuente de ventas (st.secrets['supabase_sales'] o ['mssql_sales']).")
@@ -255,7 +254,7 @@ def load_sales() -> pd.DataFrame:
     ]]
 
 # ========================
-# CORE LÓGICA (tu base)
+# CORE LÓGICA
 # ========================
 def recent_purchases(sales: pd.DataFrame, days_window: int) -> pd.DataFrame:
     if sales.empty:
@@ -440,7 +439,7 @@ def build_customer_offers(qdf_day: pd.DataFrame, sales_recent: pd.DataFrame, sal
     return out
 
 # ========================
-# NUEVO: COMPARADOR COTIZACIÓN VS VENTA
+# NUEVO: COMPARADOR COTIZACIÓN VS VENTA (sin matplotlib)
 # ========================
 def match_quote_for_sale(qdf_all: pd.DataFrame, sale_row: pd.Series, day_tolerance: int = 2) -> Optional[pd.Series]:
     """
@@ -457,7 +456,7 @@ def match_quote_for_sale(qdf_all: pd.DataFrame, sale_row: pd.Series, day_toleran
     ].copy()
 
     if base.empty:
-        # Intento relajado: ignorar size si no ayudó (a veces los nombres no coinciden perfecto)
+        # Intento relajado: ignorar size si no ayudó
         base = qdf_all[
             (qdf_all["product_canon"] == sale_row["product_canon"]) &
             (qdf_all["is_organic"] == bool(sale_row["is_organic"])) &
@@ -487,7 +486,7 @@ def build_quote_vs_sale(qdf_all: pd.DataFrame, sales: pd.DataFrame, days_window:
     Para ventas de los últimos N días, busca la mejor cotización cercana y calcula:
     - spread_abs = sell - quote
     - spread_pct_vs_quote = (sell - quote)/quote
-    - mejora_vs_bench = sell vs mediana 30d del cliente (opcional, informativa)
+    - delta_vs_bench = sell - mediana 30d del cliente (informativo)
     """
     if qdf_all.empty or sales.empty:
         return pd.DataFrame()
@@ -499,7 +498,7 @@ def build_quote_vs_sale(qdf_all: pd.DataFrame, sales: pd.DataFrame, days_window:
     if s.empty:
         return pd.DataFrame()
 
-    # Bench mediana 30d por cliente/producto/condiciones (para contexto)
+    # Bench mediana 30d por cliente/producto/condiciones
     bench_cut = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=30)
     bench_src = sales.copy()
     bench_src["date"] = pd.to_datetime(bench_src["date"], errors="coerce")
@@ -519,7 +518,6 @@ def build_quote_vs_sale(qdf_all: pd.DataFrame, sales: pd.DataFrame, days_window:
         spread_abs = sell - quote
         spread_pct_vs_quote = (sell - quote) / quote if quote > 0 else np.nan
 
-        # bench para contexto
         b = bench[
             (bench["customer_c"] == row["customer_c"]) &
             (bench["product_canon"] == row["product_canon"]) &
@@ -554,12 +552,65 @@ def build_quote_vs_sale(qdf_all: pd.DataFrame, sales: pd.DataFrame, days_window:
     if out.empty:
         return out
 
-    # Márgenes opcionales si tenemos costo (no siempre)
+    # Márgenes opcionales si tenemos costo
     if "cost_per_unit" in out.columns and out["cost_per_unit"].notna().any():
         out["gross_margin_abs"] = out["sell_price"] - out["cost_per_unit"]
         out["gross_margin_pct"] = (out["sell_price"] - out["cost_per_unit"]) / out["sell_price"]
 
     return out.sort_values("date_sale", ascending=False)
+
+# ========================
+# HELPERS DE UI (sin matplotlib)
+# ========================
+def show_offers_table(df: pd.DataFrame):
+    """Tabla de ofertas con barra de progreso para 'score' usando column_config (sin Styler)."""
+    if df.empty:
+        st.info("Sin ofertas para mostrar.")
+        return
+    min_s = float(df["score"].min())
+    max_s = float(df["score"].max())
+    st.dataframe(
+        df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "price": st.column_config.NumberColumn("price", format="$%.2f"),
+            "score": st.column_config.ProgressColumn(
+                "score",
+                help="Score relativo calculado por precio vs benchmark y match de condiciones.",
+                min_value=min_s,
+                max_value=max_s,
+            ),
+        },
+    )
+
+def show_compare_table(comp: pd.DataFrame):
+    """Tabla del comparador cotización vs venta con formatos numéricos (sin Styler)."""
+    if comp.empty:
+        st.info("No hay matches cotización↔venta en la ventana seleccionada.")
+        return
+    show_cols = [
+        "date_sale","customer","sales_rep","product","organic","size","loc",
+        "vendor_quote","quote_date","quote_price","sell_price","qty",
+        "spread_abs","spread_pct_vs_quote","bench_price","delta_vs_bench"
+    ]
+    show_cols = [c for c in show_cols if c in comp.columns]
+    st.dataframe(
+        comp[show_cols],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "date_sale": st.column_config.DatetimeColumn("date_sale", format="YYYY-MM-DD HH:mm"),
+            "quote_date": st.column_config.DatetimeColumn("quote_date", format="YYYY-MM-DD HH:mm"),
+            "quote_price": st.column_config.NumberColumn("quote_price", format="$%.2f"),
+            "sell_price": st.column_config.NumberColumn("sell_price", format="$%.2f"),
+            "spread_abs": st.column_config.NumberColumn("spread_abs", format="$%.2f"),
+            "spread_pct_vs_quote": st.column_config.NumberColumn("% vs quote", format="%.1f%%"),
+            "bench_price": st.column_config.NumberColumn("bench_price", format="$%.2f"),
+            "delta_vs_bench": st.column_config.NumberColumn("delta_vs_bench", format="$%.2f"),
+            "qty": st.column_config.NumberColumn("qty", format="%.0f"),
+        },
+    )
 
 # ========================
 # CONTROLES (sidebar)
@@ -626,11 +677,7 @@ with tab_ofertas:
         if offers.empty:
             st.warning("No se encontraron ofertas relevantes usando las cotizaciones del día.")
         else:
-            def _style_offers(df: pd.DataFrame):
-                # resaltar puntuaciones altas
-                sty = df.style.format({"price": "${:,.2f}", "score": "{:.2f}"})
-                return sty.background_gradient(subset=["score"], cmap="Greens")
-            st.dataframe(_style_offers(offers))
+            show_offers_table(offers)
 
     with st.expander("Vendors más recomendados (resumen)", expanded=False):
         if qdf_day.empty or sdf_recent_cust.empty:
@@ -644,7 +691,16 @@ with tab_ofertas:
                     .reset_index()
                     .sort_values(["avg_score", "recs"], ascending=[False, False])
                 )
-                st.dataframe(vend_counts.style.format({"avg_price": "${:,.2f}", "avg_score": "{:.2f}"}))
+                st.dataframe(
+                    vend_counts,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "avg_price": st.column_config.NumberColumn("avg_price", format="$%.2f"),
+                        "avg_score": st.column_config.NumberColumn("avg_score", format="%.2f"),
+                        "recs": st.column_config.NumberColumn("recs", format="%.0f"),
+                    },
+                )
             else:
                 st.info("No hay recomendaciones para resumir.")
 
@@ -667,27 +723,7 @@ with tab_compare:
             has_bench = comp["bench_price"].notna().any()
             st.metric("Con bench (30d)", value=int(comp["bench_price"].notna().sum()) if has_bench else 0)
 
-        # Tabla estilizada
-        show_cols = [
-            "date_sale","customer","sales_rep","product","organic","size","loc",
-            "vendor_quote","quote_date","quote_price","sell_price","qty",
-            "spread_abs","spread_pct_vs_quote","bench_price","delta_vs_bench"
-        ]
-        show_cols = [c for c in show_cols if c in comp.columns]
-        def _style_compare(df: pd.DataFrame):
-            sty = df.style.format({
-                "quote_price": "${:,.2f}",
-                "sell_price": "${:,.2f}",
-                "spread_abs": "${:,.2f}",
-                "spread_pct_vs_quote": "{:.1%}",
-                "bench_price": "${:,.2f}",
-                "delta_vs_bench": "${:,.2f}",
-                "qty": "{:,.0f}"
-            })
-            # verde cuando spread positivo vs cotización (vendimos más caro)
-            sty = sty.apply(lambda s: np.where(s.name=="spread_abs", ["background-color: #d1fadf" if v>0 else "" for v in s], ""), axis=0)
-            return sty
-        st.dataframe(_style_compare(comp[show_cols]))
+        show_compare_table(comp)
 
 # ---------- REPS ----------
 with tab_reps:
@@ -695,13 +731,11 @@ with tab_reps:
     if "sales_rep" not in sdf.columns or sdf["sales_rep"].isna().all():
         st.info("No hay columna de representante en las ventas (alias esperados: sales_rep, rep, seller, account_exec, account_manager).")
     else:
-        # Filtramos ventas recientes y agregamos
         cut = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
         s = sdf.loc[pd.to_datetime(sdf["date"], errors="coerce") >= cut].copy()
         if s.empty:
             st.info("No hay ventas recientes en la ventana seleccionada.")
         else:
-            # Podemos sumar info del comparador si existe para métricas por rep
             comp = build_quote_vs_sale(qdf_all, sdf, days_window=days)
             comp_rep = pd.DataFrame()
             if not comp.empty and "sales_rep" in comp.columns:
@@ -727,13 +761,15 @@ with tab_reps:
 
             st.dataframe(
                 rep_summary.fillna({"avg_spread":0, "avg_spread_pct":0})
-                .sort_values("deals", ascending=False)
-                .style.format({
-                    "qty_total":"{:,.0f}",
-                    "avg_price":"${:,.2f}",
-                    "avg_spread":"${:,.2f}",
-                    "avg_spread_pct":"{:.1%}"
-                })
+                .sort_values("deals", ascending=False),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "qty_total": st.column_config.NumberColumn("qty_total", format="%.0f"),
+                    "avg_price": st.column_config.NumberColumn("avg_price", format="$%.2f"),
+                    "avg_spread": st.column_config.NumberColumn("avg_spread", format="$%.2f"),
+                    "avg_spread_pct": st.column_config.NumberColumn("avg_spread_pct", format="%.1f%%"),
+                },
             )
 
 # ---------- ACTIVIDAD ----------
@@ -749,7 +785,7 @@ with tab_activity:
             "customer_c": "customer", "product_canon": "product", "is_organic": "organic",
             "size_std": "size", "loc_c": "location", "quantity": "qty"
         })
-        st.dataframe(subset_recent)
+        st.dataframe(subset_recent, hide_index=True, use_container_width=True)
 
     with st.expander("Recomendaciones (limitadas a Daily Sheet del día)", expanded=False):
         if qdf_day.empty or sdf_recent_cust.empty:
@@ -762,7 +798,10 @@ with tab_activity:
                 recs_show = recs.copy()
                 recs_show["organic"] = recs_show["is_organic"].map({True: "OG", False: "CV"})
                 recs_show = recs_show.drop(columns=["is_organic"], errors="ignore")
-                st.dataframe(recs_show[["customer", "product", "organic", "size", "loc", "vendor", "price", "score", "why"]])
+                st.dataframe(
+                    recs_show[["customer", "product", "organic", "size", "loc", "vendor", "price", "score", "why"]],
+                    hide_index=True, use_container_width=True
+                )
 
 # ---------- AYUDA ----------
 with tab_help:
@@ -783,11 +822,7 @@ with tab_help:
 - **bench 30d**: mediana de precio que ese cliente pagó en ~30 días para ese commodity/condiciones.
 
 **Tips:**
-- Si no aparece el Sales Rep, agregá una columna en la tabla de ventas con algún alias aceptado (sales_rep, rep, seller...).  
+- Si no aparece el Sales Rep, agregá una columna en la tabla de ventas con algún alias aceptado (sales_rep, rep, seller, account_exec, account_manager).  
 - Si el comparador trae pocos matches, puede ser por diferencias en `size`/`loc`. Relajamos `size` automáticamente si no hay match exacto.
 """)
-    st.info("Ingeniería de fricción: menos clicks, más contexto. Si querés, activamos un 'modo simple' con sólo 2 tabs.")
-
-# ========================
-# FIN
-# ========================
+    st.info("Modo simple opcional: podemos dejar solo 'Ofertas' y 'Comparar' con un toggle si querés.")
