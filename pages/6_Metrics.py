@@ -6,44 +6,56 @@ from simple_auth import ensure_login, logout_button
 
 # =============================================
 # Daily Metrics — Supabase [sales] (simple_auth)
-# Requiere políticas RLS de demo (allow_insert_demo, allow_select_demo)
+# Shows ONLY the current user's records in "Last records" (date + user name formatted)
+# Requires permissive RLS (demo) OR server-side RLS aligned with your setup.
 # =============================================
 
-# ✅ Login obligatorio con tu simple_auth (NO Supabase Auth)
+# ✅ Require login via your simple_auth (NOT Supabase Auth)
 user = ensure_login()
 with st.sidebar:
     logout_button()
 
 st.set_page_config(page_title="Daily Metrics — Supabase Sales", page_icon="📈", layout="centered")
 st.title("Daily Metrics — Supabase [sales] 📈")
-st.caption(f"Sesión: {user}")
-st.caption("Registra actividad comercial (Reached / Engaged / Closed) en el proyecto *supabase_sales*.")
+st.caption(f"Session: {user}")
+st.caption("Record commercial activity (Reached / Engaged / Closed) in the *supabase_sales* project.")
 
-# --- Credenciales desde secrets (.streamlit/secrets.toml) ---
+# --- Credentials from secrets (.streamlit/secrets.toml) ---
 # [supabase_sales]
-# url = "https://TU-PROYECTO-SALES.supabase.co"
+# url = "https://YOUR-SALES-PROJECT.supabase.co"
 # anon_key = "ey..."
 if "supabase_sales" not in st.secrets:
-    st.error("Faltan credenciales: agrega el bloque [supabase_sales] en .streamlit/secrets.toml (url y anon_key).")
+    st.error("Missing credentials: add [supabase_sales] (url, anon_key) to .streamlit/secrets.toml.")
     st.stop()
 
 SUPABASE_URL = st.secrets["supabase_sales"].get("url", "")
 SUPABASE_ANON_KEY = st.secrets["supabase_sales"].get("anon_key", "")
 
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
-    st.error("Completa supabase_sales.url y supabase_sales.anon_key en secrets.")
+    st.error("Please fill supabase_sales.url and supabase_sales.anon_key in secrets.")
     st.stop()
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-# --- Usuario de sesión desde simple_auth ---
-session_name = str(user)  # se usará como user_name en los inserts
+# --- Resolve display name from user_profiles (username -> full_name) ---
+@st.cache_data(show_spinner=False)
+def get_display_name(username: str) -> str:
+    try:
+        res = supabase.table("user_profiles").select("full_name").eq("username", username).limit(1).execute()
+        if res.data:
+            return (res.data[0].get("full_name") or username).strip()
+        return username
+    except Exception:
+        return username
 
-TABLE_NAME = "daily_metrics"  # Debe existir en el proyecto supabase_sales
+display_name = get_display_name(str(user))
 
+TABLE_NAME = "daily_metrics"  # Must exist in supabase_sales
+
+# ---------- Form: create a new record ----------
 with st.form("metrics_form_sales", clear_on_submit=False):
-    # El nombre viene de la sesión y no es editable
-    st.text_input("Nombre de usuario", value=session_name, disabled=True)
+    # User name comes from your session/profile and is not editable
+    st.text_input("User", value=display_name, disabled=True)
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -53,60 +65,63 @@ with st.form("metrics_form_sales", clear_on_submit=False):
     with c3:
         clients_closed = st.number_input("CLIENTS CLOSED", min_value=0, step=1, value=0)
 
-    submitted = st.form_submit_button("Guardar en SALES")
+    submitted = st.form_submit_button("Save to SALES")
 
 if submitted:
     if clients_reached_out < (clients_engaged + clients_closed):
-        st.warning("Reached Out no puede ser menor que Engaged + Closed.")
+        st.warning("Reached Out cannot be less than Engaged + Closed.")
     else:
         try:
             payload = {
-                "user_name": session_name.strip(),
+                "user_name": display_name,
                 "clients_reached_out": int(clients_reached_out),
                 "clients_engaged": int(clients_engaged),
                 "clients_closed": int(clients_closed),
             }
             res = supabase.table(TABLE_NAME).insert(payload).execute()
             if getattr(res, "data", None):
-                st.success(f"¡Guardado en SALES! ID: {res.data[0].get('id', '—')}")
+                st.success(f"Saved! ID: {res.data[0].get('id', '—')}")
                 time.sleep(0.3)
             else:
-                st.info("Insert realizado, pero no se devolvieron datos.")
+                st.info("Insert completed, but no data was returned.")
         except Exception as e:
-            st.error(f"Error al insertar: {e}")
+            st.error(f"Insert error: {e}")
 
 st.markdown("---")
-st.subheader("Mis últimos registros (Sales)")
-with st.expander("Filtros"):
-    c1, c2 = st.columns([2,1])
-    with c1:
-        user_filter = st.text_input("Filtrar por usuario (contiene)", value=session_name)
-    with c2:
-        limit = st.number_input("Límites de filas", 5, 200, 50, step=5)
+# ---------- Last records: ONLY this user's rows, show Date + User ----------
+st.subheader("Last records (your activity only)")
 
 try:
-    # Con la política select demo, podremos ver todas las filas; nos filtramos por nombre.
-    query = supabase.table(TABLE_NAME).select("*").order("created_at", desc=True)
-    if user_filter.strip():
-        query = query.ilike("user_name", f"%{user_filter.strip()}%")
-
-    res = query.limit(int(limit)).execute()
+    # Server-side filter to only fetch this user's rows
+    query = (
+        supabase
+        .table(TABLE_NAME)
+        .select("created_at,user_name")
+        .eq("user_name", display_name)
+        .order("created_at", desc=True)
+        .limit(100)
+    )
+    res = query.execute()
     rows = res.data or []
 
     if not rows:
-        st.info("No hay registros aún en SALES para el filtro aplicado.")
+        st.info("No records yet for your user.")
     else:
         df = pd.DataFrame(rows)
-        ordered_cols = [c for c in ["created_at","user_name","clients_reached_out","clients_engaged","clients_closed","id"] if c in df.columns] + [c for c in df.columns if c not in ["created_at","user_name","clients_reached_out","clients_engaged","clients_closed","id"]]
-        df = df[ordered_cols]
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        # Format date nicely (local time display via pandas)
+        if "created_at" in df.columns:
+            df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+            # Example: Sep 15, 2025 14:05
+            df["Date"] = df["created_at"].dt.strftime("%b %d, %Y %H:%M")
+        else:
+            df["Date"] = ""
 
-        st.markdown("### Totales en pantalla (Sales)")
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Reached Out (sum)", int(df.get("clients_reached_out", pd.Series(dtype=int)).sum()))
-        k2.metric("Engaged (sum)", int(df.get("clients_engaged", pd.Series(dtype=int)).sum()))
-        k3.metric("Closed (sum)", int(df.get("clients_closed", pd.Series(dtype=int)).sum()))
+        df["User"] = df.get("user_name", display_name)
+
+        # Only show Date and User as requested
+        df_show = df[["Date", "User"]]
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
 except Exception as e:
-    st.error(f"Error al consultar datos: {e}")
+    st.error(f"Query error: {e}")
 
-st.caption("Esta página usa simple_auth (no Supabase Auth) y requiere políticas RLS de demo para INSERT/SELECT.")
+st.caption("This page uses simple_auth (not Supabase Auth). The 'Last records' section shows only your rows, with formatted date and your display name.")
