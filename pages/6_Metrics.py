@@ -3,12 +3,12 @@ import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
 
-st.set_page_config(page_title="Daily Metrics — Supabase Sales", page_icon="📈", layout="centered")
-st.title("Daily Metrics — Supabase [sales] 📈")
-st.caption("Registra actividad comercial (Reached / Engaged / Closed) en el proyecto *supabase_sales*.")
+st.set_page_config(page_title="Daily Metrics — Supabase Sales (Auth)", page_icon="🔐", layout="centered")
+st.title("Daily Metrics — Supabase [sales] 🔐")
+st.caption("Registra actividad comercial (Reached / Engaged / Closed) en el proyecto *supabase_sales* con RLS por usuario.")
 
 # --- Credenciales desde secrets ---
-# Debes definir en .streamlit/secrets.toml una sección:
+# .streamlit/secrets.toml debe tener:
 # [supabase_sales]
 # url = "https://TU-PROYECTO-SALES.supabase.co"
 # anon_key = "ey..."
@@ -25,10 +25,23 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+# --- Sesión / Auth ---
+# Se espera que simple_auth.py haya guardado estos valores:
+# st.session_state["user_id"] (UUID de Supabase Auth)
+# st.session_state["user_name"] (nombre legible)
+session_uid = st.session_state.get("user_id")
+session_name = st.session_state.get("user_name")
+
+if not session_uid or not session_name:
+    st.error("No estás autenticado. Ve al Home / simple_auth.py para iniciar sesión.")
+    st.stop()
+
 TABLE_NAME = "daily_metrics"  # Debe existir en el proyecto supabase_sales
 
 with st.form("metrics_form_sales", clear_on_submit=False):
-    user_name = st.text_input("Nombre de usuario", value="", placeholder="p.ej. Sergio Lopez")
+    # El nombre viene de la sesión y no es editable
+    st.text_input("Nombre de usuario", value=session_name, disabled=True)
+
     c1, c2, c3 = st.columns(3)
     with c1:
         clients_reached_out = st.number_input("CLIENTS REACHED OUT", min_value=0, step=1, value=0)
@@ -36,17 +49,17 @@ with st.form("metrics_form_sales", clear_on_submit=False):
         clients_engaged = st.number_input("CLIENTS ENGAGED", min_value=0, step=1, value=0)
     with c3:
         clients_closed = st.number_input("CLIENTS CLOSED", min_value=0, step=1, value=0)
+
     submitted = st.form_submit_button("Guardar en SALES")
 
 if submitted:
-    if not user_name.strip():
-        st.warning("El nombre de usuario es obligatorio.")
-    elif clients_reached_out < (clients_engaged + clients_closed):
+    if clients_reached_out < (clients_engaged + clients_closed):
         st.warning("Reached Out no puede ser menor que Engaged + Closed.")
     else:
         try:
             payload = {
-                "user_name": user_name.strip(),
+                "user_id": session_uid,              # RLS por usuario
+                "user_name": session_name.strip(),
                 "clients_reached_out": int(clients_reached_out),
                 "clients_engaged": int(clients_engaged),
                 "clients_closed": int(clients_closed),
@@ -61,25 +74,27 @@ if submitted:
             st.error(f"Error al insertar: {e}")
 
 st.markdown("---")
-st.subheader("Últimos registros (Sales)")
+st.subheader("Mis últimos registros (Sales)")
 with st.expander("Filtros"):
     c1, c2 = st.columns([2,1])
     with c1:
-        user_filter = st.text_input("Filtrar por usuario (contiene)", value="")
+        user_filter = st.text_input("Filtrar por usuario (contiene)", value=session_name)
     with c2:
         limit = st.number_input("Límites de filas", 5, 200, 50, step=5)
 
 try:
+    # Con la política de SELECT por user_id, Supabase sólo devolverá filas del usuario autenticado.
     query = supabase.table(TABLE_NAME).select("*").order("created_at", desc=True)
+
     if user_filter.strip():
-        query = query.ilike("user_name", f"%{user_filter.strip()}%").limit(int(limit))
-    else:
-        query = query.limit(int(limit))
-    res = query.execute()
+        # Esto filtra adicionalmente por nombre, pero la RLS ya limita a tus filas.
+        query = query.ilike("user_name", f"%{user_filter.strip()}%")
+
+    res = query.limit(int(limit)).execute()
     rows = res.data or []
 
     if not rows:
-        st.info("No hay registros aún en SALES.")
+        st.info("No hay registros aún en SALES para tu usuario.")
     else:
         df = pd.DataFrame(rows)
         ordered_cols = [c for c in ["created_at","user_name","clients_reached_out","clients_engaged","clients_closed","id"] if c in df.columns] + [c for c in df.columns if c not in ["created_at","user_name","clients_reached_out","clients_engaged","clients_closed","id"]]
@@ -94,4 +109,4 @@ try:
 except Exception as e:
     st.error(f"Error al consultar datos: {e}")
 
-st.caption("Esta página apunta al proyecto Supabase **supabase_sales** y a la tabla public.daily_metrics.")
+st.caption("Esta página apunta al proyecto Supabase **supabase_sales** y a la tabla public.daily_metrics con RLS por usuario (user_id = auth.uid()).")
