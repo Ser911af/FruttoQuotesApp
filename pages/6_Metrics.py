@@ -5,22 +5,22 @@ from supabase import create_client, Client
 from simple_auth import ensure_login, logout_button
 
 # =============================================
-# Daily Metrics — Supabase [sales] (simple_auth)
-# Shows ONLY the current user's records in "Last records" (date + user name formatted)
+# Daily Metrics - Supabase [sales] (simple_auth)
+# Shows ONLY the current user's records in "Last 5 records" (date + metrics)
 # Requires permissive RLS (demo) OR server-side RLS aligned with your setup.
 # =============================================
 
-# ✅ Require login via your simple_auth (NOT Supabase Auth)
+# Require login via your simple_auth (NOT Supabase Auth)
 user = ensure_login()
 with st.sidebar:
     logout_button()
 
-st.set_page_config(page_title="Daily Metrics — Supabase Sales", page_icon="📈", layout="centered")
-st.title("Daily Metrics — Supabase [sales] 📈")
+st.set_page_config(page_title="Daily Metrics - Supabase Sales", page_icon="📈", layout="centered")
+st.title("Daily Metrics - Supabase [sales]")
 st.caption(f"Session: {user}")
-st.caption("Record commercial activity (Reached / Engaged / Closed) in the *supabase_sales* project.")
+st.caption("Record commercial activity (Reached / Engaged / Closed) in the supabase_sales project.")
 
-# --- Credentials from secrets (.streamlit/secrets.toml) ---
+# Credentials from secrets (.streamlit/secrets.toml)
 # [supabase_sales]
 # url = "https://YOUR-SALES-PROJECT.supabase.co"
 # anon_key = "ey..."
@@ -37,7 +37,7 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-# --- Resolve display name from user_profiles (username -> full_name) ---
+# Resolve display name from user_profiles (username -> full_name)
 @st.cache_data(show_spinner=False)
 def get_display_name(username: str) -> str:
     try:
@@ -80,7 +80,7 @@ if submitted:
             }
             res = supabase.table(TABLE_NAME).insert(payload).execute()
             if getattr(res, "data", None):
-                st.success(f"Saved! ID: {res.data[0].get('id', '—')}")
+                st.success("Saved!")
                 time.sleep(0.3)
             else:
                 st.info("Insert completed, but no data was returned.")
@@ -125,4 +125,4 @@ try:
 except Exception as e:
     st.error(f"Query error: {e}")
 
-st.caption("This page uses simple_auth (not Supabase Auth). The 'Last 5 records' section shows your latest entries with formatted date and metrics."). The 'Last records' section shows only your rows, with formatted date and your display name.")
+st.caption("This page uses simple_auth (not Supabase Auth). The 'Last 5 records' section shows your latest entries with formatted date and metrics.")
