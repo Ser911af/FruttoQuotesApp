@@ -15,9 +15,7 @@ st.caption(f"Sesión: {user}")
 st.caption("Registra actividad comercial (Reached / Engaged / Closed) en el proyecto *supabase_sales*.")
 
 
-st.set_page_config(page_title="Daily Metrics — Supabase Sales (Auth)", page_icon="🔐", layout="centered")
-st.title("Daily Metrics — Supabase [sales] 🔐")
-st.caption("Registra actividad comercial (Reached / Engaged / Closed) en el proyecto *supabase_sales* con RLS por usuario.")
+ 
 
 # --- Credenciales desde secrets ---
 # .streamlit/secrets.toml debe tener:
