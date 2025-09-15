@@ -2,6 +2,18 @@ import time
 import pandas as pd
 import streamlit as st
 from supabase import create_client, Client
+from simple_auth import ensure_login, logout_button
+
+# ✅ Login obligatorio con tu simple_auth
+user = ensure_login()
+with st.sidebar:
+    logout_button()
+
+st.set_page_config(page_title="Daily Metrics — Supabase Sales", page_icon="📈", layout="centered")
+st.title("Daily Metrics — Supabase [sales] 📈")
+st.caption(f"Sesión: {user}")
+st.caption("Registra actividad comercial (Reached / Engaged / Closed) en el proyecto *supabase_sales*.")
+
 
 st.set_page_config(page_title="Daily Metrics — Supabase Sales (Auth)", page_icon="🔐", layout="centered")
 st.title("Daily Metrics — Supabase [sales] 🔐")
