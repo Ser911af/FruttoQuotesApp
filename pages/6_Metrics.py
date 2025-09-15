@@ -88,40 +88,41 @@ if submitted:
             st.error(f"Insert error: {e}")
 
 st.markdown("---")
-# ---------- Last records: ONLY this user's rows, show Date + User ----------
-st.subheader("Last records (your activity only)")
+# ---------- Last records: ONLY this user's rows, last 5 with formatted date and metrics ----------
+st.subheader("Last 5 records (your activity)")
 
 try:
-    # Server-side filter to only fetch this user's rows
-    query = (
+    # Server-side filter to only fetch this user's rows, newest first, limit 5
+    res = (
         supabase
         .table(TABLE_NAME)
-        .select("created_at,user_name")
+        .select("created_at,user_name,clients_reached_out,clients_engaged,clients_closed")
         .eq("user_name", display_name)
         .order("created_at", desc=True)
-        .limit(100)
+        .limit(5)
+        .execute()
     )
-    res = query.execute()
     rows = res.data or []
 
     if not rows:
         st.info("No records yet for your user.")
     else:
         df = pd.DataFrame(rows)
-        # Format date nicely (local time display via pandas)
-        if "created_at" in df.columns:
-            df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-            # Example: Sep 15, 2025 14:05
-            df["Date"] = df["created_at"].dt.strftime("%b %d, %Y %H:%M")
-        else:
-            df["Date"] = ""
+        # Format date nicely
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+        df["Date"] = df["created_at"].dt.strftime("%b %d, %Y %H:%M")
 
-        df["User"] = df.get("user_name", display_name)
+        # Rename metric columns for display
+        df.rename(columns={
+            "clients_reached_out": "CLIENTS REACHED OUT",
+            "clients_engaged": "CLIENTS ENGAGED",
+            "clients_closed": "CLIENTS CLOSED",
+        }, inplace=True)
 
-        # Only show Date and User as requested
-        df_show = df[["Date", "User"]]
+        # Show exactly: Date + the three metrics
+        df_show = df[["Date", "CLIENTS REACHED OUT", "CLIENTS ENGAGED", "CLIENTS CLOSED"]]
         st.dataframe(df_show, use_container_width=True, hide_index=True)
 except Exception as e:
     st.error(f"Query error: {e}")
 
-st.caption("This page uses simple_auth (not Supabase Auth). The 'Last records' section shows only your rows, with formatted date and your display name.")
+st.caption("This page uses simple_auth (not Supabase Auth). The 'Last 5 records' section shows your latest entries with formatted date and metrics."). The 'Last records' section shows only your rows, with formatted date and your display name.")
