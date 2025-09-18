@@ -84,11 +84,13 @@ def _title_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns=mapping)
 
 def _fmt_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    """Convert date columns to 'YYYY-MM-DD' for display."""
+    """Convert date columns to 'YYYY-MM-DD' for display (empty if NaT)."""
     df = df.copy()
     for c in cols:
         if c in df.columns:
-            df[c] = pd.to_datetime(df[c], errors="coerce").dt.strftime("%Y-%m-%d")
+            s = pd.to_datetime(df[c], errors="coerce")
+            out = s.dt.strftime("%Y-%m-%d")
+            df[c] = out.fillna("")
     return df
 
 def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
@@ -98,45 +100,6 @@ def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").round(n)
     return df
-
-# per-cell formatters to strings (robust fallback)
-def _fmt_money0_series(s: pd.Series) -> pd.Series:
-    return s.apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "")
-
-def _fmt_money2_series(s: pd.Series) -> pd.Series:
-    return s.apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
-
-def _fmt_int_series(s: pd.Series) -> pd.Series:
-    return s.apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
-
-def _fmt_float2_series(s: pd.Series) -> pd.Series:
-    return s.apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "")
-
-def _fmt_pct2_series_from_ratio(s: pd.Series) -> pd.Series:
-    return s.apply(lambda x: f"{(x*100):.2f}%" if pd.notna(x) else "")
-
-def _format_df_strings(df: pd.DataFrame,
-                       money0=None, money2=None, ints=None, floats2=None, pct2=None) -> pd.DataFrame:
-    """
-    Fallback: returns a COPY with formatted string columns for display.
-    """
-    money0 = money0 or []
-    money2 = money2 or []
-    ints    = ints or []
-    floats2 = floats2 or []
-    pct2    = pct2 or []
-    out = df.copy()
-    for c in money0:
-        if c in out.columns: out[c] = _fmt_money0_series(pd.to_numeric(out[c], errors="coerce"))
-    for c in money2:
-        if c in out.columns: out[c] = _fmt_money2_series(pd.to_numeric(out[c], errors="coerce"))
-    for c in ints:
-        if c in out.columns: out[c] = _fmt_int_series(pd.to_numeric(out[c], errors="coerce"))
-    for c in floats2:
-        if c in out.columns: out[c] = _fmt_float2_series(pd.to_numeric(out[c], errors="coerce"))
-    for c in pct2:
-        if c in out.columns: out[c] = _fmt_pct2_series_from_ratio(pd.to_numeric(out[c], errors="coerce"))
-    return out
 
 # ------------------------
 # SALES LOADER (ventas_frutto)
@@ -159,7 +122,7 @@ def load_sales() -> pd.DataFrame:
             got = len(data)
             if got < limit:
                 break
-            offset += got  # ✅ advance by what we actually received
+            offset += got  # advance by what we actually received
         df = pd.DataFrame(rows)
     else:
         # 2) MSSQL (optional)
@@ -308,9 +271,9 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     agg["weeks_span"] = span_weeks
     agg["regularity_ratio"] = (agg["active_weeks"] / agg["weeks_span"]).clip(upper=1.0)
 
-    # Recency (days since last sale; use Bogota tz)
-    today = pd.Timestamp.now(tz="America/Bogota").tz_localize(None)
-    agg["recency_days"] = (today - agg["last_sale"]).dt.days
+    # Recency (days since last sale) normalized to date (no time-of-day drift)
+    today_norm = pd.Timestamp.now(tz="America/Bogota").normalize().tz_localize(None)
+    agg["recency_days"] = (today_norm - agg["last_sale"].dt.normalize()).dt.days
 
     # Join orders/AOV
     agg = agg.join(orders_per_customer, how="left")
@@ -346,10 +309,12 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
 
     return agg
 
+# ---- New: pair-level metrics for (rep, customer) in rep ranking ----
 def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """
-    Sales Rep ranking using ALL customers they touched in the range,
-    weighting per (rep, customer) revenue in the range.
+    Sales Rep ranking using ALL customers they touched in the range.
+    Uses pair-level (rep, customer) metrics for recency/regularity and
+    revenue-weighted averages across pairs.
     """
     if df.empty:
         return pd.DataFrame()
@@ -358,50 +323,70 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     if d.empty:
         return pd.DataFrame()
 
-    cust = make_retention_metrics(df, start, end)
-    if cust.empty:
-        return pd.DataFrame()
-    cust = cust.rename(columns={"customer": "customer_c"})
-
-    # Revenue per (rep, customer) in the range
+    # Base revenue/qty per pair in range
     rep_cust = (d.groupby(["sales_rep_c", "customer_c"], dropna=False)
                   .agg(rev=("total_revenue","sum"),
                        qty=("quantity","sum"))
                   .reset_index())
 
-    # Exclude blanks (optional)
+    # Exclude blanks
     rep_cust = rep_cust[rep_cust["sales_rep_c"].notna() & (rep_cust["sales_rep_c"] != "")]
 
-    # Totals per rep
-    rep_totals = (rep_cust.groupby("sales_rep_c", dropna=False)
-                    .agg(total_revenue=("rev","sum"),
-                         total_qty=("qty","sum"),
-                         active_customers=("customer_c","nunique"))
-                    .reset_index()
-                    .rename(columns={"sales_rep_c":"sales_rep"}))
+    # Pair-level recency & regularity
+    d2 = d.copy()
+    d2["week_key"] = d2["date"].apply(_week_key)
 
-    # Weighted averages using (rep, customer) revenue
-    rc = rep_cust.merge(
-        cust[["customer_c","retention_score","regularity_ratio","recency_days"]],
-        on="customer_c", how="left"
-    )
+    pair_span = (d2.groupby(["sales_rep_c","customer_c"], dropna=False)
+                   .agg(
+                       last_sale=("date","max"),
+                       first_sale=("date","min"),
+                       active_weeks=("week_key","nunique"),
+                   )
+                   .reset_index())
+
+    # weeks_span (>=1)
+    span_days = (pair_span["last_sale"].dt.normalize() - pair_span["first_sale"].dt.normalize()).dt.days.clip(lower=0)
+    weeks_span = (span_days // 7) + 1
+    pair_span["weeks_span"] = weeks_span
+    pair_span["regularity_pair"] = (pair_span["active_weeks"] / pair_span["weeks_span"]).clip(upper=1.0)
+
+    today_norm = pd.Timestamp.now(tz="America/Bogota").normalize().tz_localize(None)
+    pair_span["recency_days_pair"] = (today_norm - pair_span["last_sale"].dt.normalize()).dt.days
+
+    # Merge pair metrics into revenue matrix
+    rc = rep_cust.merge(pair_span, on=["sales_rep_c","customer_c"], how="left")
     rc = rc.rename(columns={"sales_rep_c": "sales_rep"})
     rc["w"] = rc["rev"].clip(lower=0) + 1e-9
 
+    # Revenue-weighted averages per rep
     grp = (rc.groupby("sales_rep", dropna=False)
              .apply(lambda g: pd.Series({
-                 "avg_retention_score": np.average(g["retention_score"].fillna(0), weights=g["w"]),
-                 "avg_regularity":     np.average(g["regularity_ratio"].fillna(0), weights=g["w"]),
-                 "avg_recency_days":   np.average(
-                     g["recency_days"].fillna(g["recency_days"].median() if np.isfinite(np.nanmedian(g["recency_days"])) else 0),
-                     weights=g["w"]
-                 )
+                 "avg_regularity":   np.average(g["regularity_pair"].fillna(0), weights=g["w"]),
+                 "avg_recency_days": np.average(g["recency_days_pair"].fillna(g["recency_days_pair"].median() if np.isfinite(np.nanmedian(g["recency_days_pair"])) else 0),
+                                               weights=g["w"])
              }))
              .reset_index())
 
-    rep = rep_totals.merge(grp, on="sales_rep", how="left").fillna({
-        "avg_retention_score": 0, "avg_regularity": 0, "avg_recency_days": 0
-    })
+    # Totals per rep
+    rep_totals = (rep_cust.groupby("sales_rep", dropna=False)
+                    .agg(total_revenue=("rev","sum"),
+                         total_qty=("qty","sum"),
+                         active_customers=("customer_c","nunique"))
+                    .reset_index())
+
+    # avg_retention_score as revenue-weighted average of customer scores (range-level)
+    cust_all = make_retention_metrics(d, start, end).rename(columns={"customer":"customer_c"})
+    rc2 = rc.merge(cust_all[["customer_c","retention_score"]], on="customer_c", how="left")
+    by_rep_ret = (rc2.groupby("sales_rep", dropna=False)
+                    .apply(lambda g: pd.Series({
+                        "avg_retention_score": np.average(g["retention_score"].fillna(0), weights=g["w"])
+                    }))
+                    .reset_index())
+
+    rep = (rep_totals
+           .merge(grp, on="sales_rep", how="left")
+           .merge(by_rep_ret, on="sales_rep", how="left")
+           .fillna({"avg_regularity":0, "avg_recency_days":0, "avg_retention_score":0}))
 
     # Composite rank (tweak as needed)
     rep["rank_score"] = (
@@ -413,19 +398,21 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     rep = rep.sort_values(["rank_score","total_revenue"], ascending=[False, False]).reset_index(drop=True)
     return rep
 
+# ---- New: customers_by_rep only uses that rep's own sales (pair-consistent) ----
 def customers_by_rep(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, rep: str) -> pd.DataFrame:
-    """Customer ranking for a given Sales Rep (based on the same retention metrics)."""
+    """
+    Customer ranking for a given Sales Rep computed ONLY from that rep's own sales in [start, end).
+    """
     if not rep:
         return pd.DataFrame()
-    cust = make_retention_metrics(df, start, end)
-    if cust.empty:
+
+    rep_norm = _normalize_txt(rep)
+    d = df[(df["date"] >= start) & (df["date"] < end) & (df["sales_rep_c"] == rep_norm)].copy()
+    if d.empty:
         return pd.DataFrame()
 
-    d = df[(df["date"] >= start) & (df["date"] < end)].copy()
-    # Keep only customers touched by this rep in the range
-    touched = d[d["sales_rep_c"] == _normalize_txt(rep)]["customer_c"].dropna().unique().tolist()
-    out = cust[cust["customer"].isin(touched)].copy()
-    return out.sort_values(["retention_score","total_revenue"], ascending=[False, False])
+    out = make_retention_metrics(d, start, end)
+    return out.sort_values(["retention_score","total_revenue"], ascending=[False, False]).reset_index(drop=True)
 
 # ------------------------
 # SIDEBAR FILTERS
@@ -436,7 +423,7 @@ with st.sidebar:
     # Date range (default: last 90 days, Bogota timezone)
     today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
     default_start = (today_bo - pd.Timedelta(days=90)).tz_localize(None)
-    default_end = (today_bo + pd.Timedelta(days=1)).tz_localize(None)
+    default_end = today_bo.tz_localize(None)  # default end is "today"; +1 is applied only after user picks
 
     date_range = st.date_input("Date range", value=(default_start, default_end))
     if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -444,6 +431,9 @@ with st.sidebar:
         end_date = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)  # end exclusive
     else:
         start_date, end_date = default_start, default_end
+
+    if start_date >= end_date:
+        start_date, end_date = end_date - pd.Timedelta(days=1), end_date
 
     # Location filter uses LOT LOCATION as requested
     lot_location_filter = st.text_input("Lot Location (contains):", "")
@@ -455,11 +445,13 @@ with st.sidebar:
 sdf = load_sales()
 
 # TOP METRICS
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     st.metric("Sales records", value=len(sdf))
 with col2:
     st.metric("Unique customers", value=int(sdf["customer_c"].nunique()) if not sdf.empty else 0)
+with col3:
+    st.metric("Sales records (filtered)", value=0)  # will update after mask
 
 if sdf.empty:
     st.stop()
@@ -472,6 +464,7 @@ if organic_only:
     mask &= (sdf["is_organic"] == True)
 
 sdf_f = sdf[mask].copy()
+col3.metric("Sales records (filtered)", value=len(sdf_f))
 st.caption(f"Filtered rows: {len(sdf_f)} in selected range.")
 
 if sdf_f.empty:
@@ -479,7 +472,7 @@ if sdf_f.empty:
     st.stop()
 
 # ------------------------
-# CUSTOMER RANKING (pretty)
+# CUSTOMER RANKING (numeric + column_config for proper sorting)
 # ------------------------
 st.subheader("🏢 Customer Retention Rankings")
 cust_rank = make_retention_metrics(sdf_f, start_date, end_date)
@@ -494,7 +487,7 @@ else:
     cust_show["customer"] = cust_show["customer_disp"].fillna(cust_show["customer"].str.title())
     cust_show = cust_show.drop(columns=["customer_disp"], errors="ignore")
 
-    # Dates + rounding
+    # Dates (strings) + keep numeric columns numeric for sorting
     cust_show = _fmt_dates(cust_show, ["first_sale", "last_sale"])
     cust_show = _round_cols(cust_show, {"retention_score": 3})
 
@@ -504,18 +497,25 @@ else:
     cust_show = cust_show[cust_cols]
     cust_show_disp = _title_cols(cust_show)
 
-    # Fallback to formatted strings
-    cust_show_fmt = _format_df_strings(
+    st.dataframe(
         cust_show_disp,
-        money0=["Total Revenue"],
-        money2=["Aov"],
-        ints=["N Orders","Total Qty","Recency Days","Active Weeks","Weeks Span"],
-        pct2=["Regularity Ratio"],
-        floats2=["Retention Score"]
+        use_container_width=True,
+        column_config={
+            "Customer": st.column_config.TextColumn(),
+            "Total Revenue": st.column_config.NumberColumn(format="$%,d"),
+            "N Orders": st.column_config.NumberColumn(format="%,d"),
+            "Aov": st.column_config.NumberColumn(format="$%,.2f"),
+            "Total Qty": st.column_config.NumberColumn(format="%,d"),
+            "Last Sale": st.column_config.TextColumn(),
+            "Recency Days": st.column_config.NumberColumn(format="%,d"),
+            "Active Weeks": st.column_config.NumberColumn(format="%,d"),
+            "Weeks Span": st.column_config.NumberColumn(format="%,d"),
+            "Regularity Ratio": st.column_config.NumberColumn(format="%.2f%%"),  # ratio 0–1 shown as %
+            "Retention Score": st.column_config.NumberColumn(format="%.3f"),
+        },
+        hide_index=True,
     )
-    st.dataframe(cust_show_fmt, use_container_width=True)
 
-    # Chart uses numeric df (not the formatted strings)
     if ALTAIR_OK and len(cust_show) > 0:
         chart = alt.Chart(cust_show.head(25)).mark_bar().encode(
             x=alt.X("retention_score:Q", title="Retention Score"),
@@ -525,7 +525,7 @@ else:
         st.altair_chart(chart, use_container_width=True)
 
 # ------------------------
-# SALES REP RANKING (pretty)
+# SALES REP RANKING (numeric + column_config)
 # ------------------------
 st.subheader("🧑‍💼 Sales Rep Retention Rankings")
 rep_rank = make_salesrep_rankings(sdf_f, start_date, end_date)
@@ -535,7 +535,7 @@ else:
     rep_show = rep_rank.copy()
     rep_show["sales_rep"] = rep_show["sales_rep"].astype(str).str.title()
 
-    # Rounding
+    # Rounding (keep numeric)
     rep_show = _round_cols(rep_show, {
         "avg_retention_score": 3,
         "avg_recency_days": 1,
@@ -547,14 +547,20 @@ else:
     rep_show = rep_show[rep_cols]
     rep_show_disp = _title_cols(rep_show)
 
-    rep_show_fmt = _format_df_strings(
+    st.dataframe(
         rep_show_disp,
-        money0=["Total Revenue"],
-        ints=["Active Customers"],
-        pct2=["Avg Regularity"],
-        floats2=["Avg Retention Score","Avg Recency Days","Rank Score"]
+        use_container_width=True,
+        column_config={
+            "Sales Rep": st.column_config.TextColumn(),
+            "Active Customers": st.column_config.NumberColumn(format="%,d"),
+            "Total Revenue": st.column_config.NumberColumn(format="$%,d"),
+            "Avg Retention Score": st.column_config.NumberColumn(format="%.3f"),
+            "Avg Regularity": st.column_config.NumberColumn(format="%.2f%%"),
+            "Avg Recency Days": st.column_config.NumberColumn(format="%,.1f"),
+            "Rank Score": st.column_config.NumberColumn(format="%.6f"),
+        },
+        hide_index=True,
     )
-    st.dataframe(rep_show_fmt, use_container_width=True)
 
     if ALTAIR_OK and len(rep_show) > 0:
         chart2 = alt.Chart(rep_show.head(20)).mark_bar().encode(
@@ -565,7 +571,7 @@ else:
         st.altair_chart(chart2, use_container_width=True)
 
 # ------------------------
-# CUSTOMERS BY SALES REP (pretty)
+# CUSTOMERS BY SALES REP (pair-consistent, numeric + column_config)
 # ------------------------
 st.subheader("🔎 Customers by Sales Rep")
 
@@ -598,15 +604,23 @@ if rep_sel_disp:
         cr = cr[cr_cols]
         cr_disp = _title_cols(cr)
 
-        cr_fmt = _format_df_strings(
+        st.dataframe(
             cr_disp,
-            money0=["Total Revenue"],
-            money2=["Aov"],
-            ints=["N Orders","Recency Days","Active Weeks","Weeks Span"],
-            pct2=["Regularity Ratio"],
-            floats2=["Retention Score"]
+            use_container_width=True,
+            column_config={
+                "Customer": st.column_config.TextColumn(),
+                "Total Revenue": st.column_config.NumberColumn(format="$%,d"),
+                "N Orders": st.column_config.NumberColumn(format="%,d"),
+                "Aov": st.column_config.NumberColumn(format="$%,.2f"),
+                "Last Sale": st.column_config.TextColumn(),
+                "Recency Days": st.column_config.NumberColumn(format="%,d"),
+                "Active Weeks": st.column_config.NumberColumn(format="%,d"),
+                "Weeks Span": st.column_config.NumberColumn(format="%,d"),
+                "Regularity Ratio": st.column_config.NumberColumn(format="%.2f%%"),
+                "Retention Score": st.column_config.NumberColumn(format="%.3f"),
+            },
+            hide_index=True,
         )
-        st.dataframe(cr_fmt, use_container_width=True)
 
 # ------------------------
 # NOTES
