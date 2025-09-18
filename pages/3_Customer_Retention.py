@@ -33,24 +33,13 @@ except Exception:
 st.set_page_config(page_title="Customer Retention Rankings", page_icon="📈", layout="wide")
 st.title("📈 Customer Retention Rankings")
 
-with st.expander("What is the Retention Score?", expanded=True):
-    st.markdown("""
-- **Revenue (35%)**: `total_revenue` (z-score, winsorized).
-- **Frequency (25%)**: `n_orders` (z-score).
-- **Recency (25%)**: days since `last_sale` (z-score, inverted).
-- **Regularity (15%)**: `active_weeks / weeks_span` (weekly purchase density).
-
-Date range is **start inclusive, end exclusive** (+1 day added to the end date).  
-""")
-
 # ------------------------
 # HELPERS
 # ------------------------
 def _normalize_txt(s: Optional[str]) -> str:
     if s is None:
         return ""
-    s = str(s)
-    s = s.replace("\u00A0", " ")  # NBSP
+    s = str(s).replace("\u00A0", " ")  # NBSP -> space
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
@@ -94,6 +83,7 @@ def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
     return df
 
 def _styled_table(df_disp: pd.DataFrame, styles: dict) -> "pd.io.formats.style.Styler":
+    # Return a Styler so Streamlit formats strings without converting data types
     return df_disp.style.format(styles, na_rep="")
 
 # ------------------------
@@ -213,6 +203,7 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
 
     d["week_key"] = d["date"].apply(_week_key)
 
+    # Orders: group by invoice if present
     if d["order_id"].notna().any():
         orders = d.groupby(["customer_c","order_id"], dropna=False).agg(
             order_revenue=("total_revenue","sum")
@@ -247,6 +238,7 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     agg["weeks_span"] = span_weeks
     agg["regularity_ratio"] = (agg["active_weeks"] / agg["weeks_span"]).clip(upper=1.0)
 
+    # Adaptive recency
     agg["recency_days"] = (as_of.normalize() - agg["last_sale"].dt.normalize()).dt.days
 
     agg = agg.join(orders_per_customer, how="left").fillna({"aov":0, "n_orders":0})
@@ -281,7 +273,7 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
 def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, as_of: pd.Timestamp) -> pd.DataFrame:
     """
     Rank reps using (rep, customer) pairs inside [start, end).
-    Recency/regularity computed at pair level; averages weighted by revenue.
+    Recency/regularity at pair level; averages weighted by revenue.
     """
     if df.empty:
         return pd.DataFrame()
@@ -290,15 +282,16 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     if d.empty:
         return pd.DataFrame()
 
+    # Totals per (rep, customer)
     rep_cust = (d.groupby(["sales_rep_c", "customer_c"], dropna=False)
                   .agg(rev=("total_revenue","sum"),
                        qty=("quantity","sum"))
                   .reset_index())
     rep_cust = rep_cust[rep_cust["sales_rep_c"].notna() & (rep_cust["sales_rep_c"] != "")]
 
+    # Weekly spans per pair
     d2 = d.copy()
     d2["week_key"] = d2["date"].apply(_week_key)
-
     pair_span = (d2.groupby(["sales_rep_c","customer_c"], dropna=False)
                    .agg(
                        last_sale=("date","max"),
@@ -306,7 +299,6 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
                        active_weeks=("week_key","nunique"),
                    )
                    .reset_index())
-
     span_days = (pair_span["last_sale"].dt.normalize() - pair_span["first_sale"].dt.normalize()).dt.days.clip(lower=0)
     pair_span["weeks_span"] = (span_days // 7) + 1
     pair_span["regularity_pair"] = (pair_span["active_weeks"] / pair_span["weeks_span"]).clip(upper=1.0)
@@ -368,7 +360,7 @@ def customers_by_rep(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, a
     return out.sort_values(["retention_score","total_revenue"], ascending=[False, False]).reset_index(drop=True)
 
 # ------------------------
-# SIDEBAR FILTERS (simplified: only date range)
+# SIDEBAR FILTERS (only date range)
 # ------------------------
 with st.sidebar:
     st.subheader("Filters")
@@ -385,7 +377,6 @@ with st.sidebar:
 
 # ✅ Adaptive as_of_date
 today_norm = pd.Timestamp.now(tz="America/Bogota").normalize().tz_localize(None)
-# end_date es exclusivo, usamos end-1 día para la “foto” del rango
 end_minus_1 = (end_date - pd.Timedelta(days=1)).normalize()
 as_of_date = min(today_norm, end_minus_1)
 st.caption(f"Recency as-of: **{as_of_date.date()}**")
@@ -412,6 +403,24 @@ st.caption(f"Filtered rows: {len(sdf_f)} in selected range.")
 if sdf_f.empty:
     st.warning("No data in the selected range.")
     st.stop()
+
+# ------------------------
+# EXPLANATION: CUSTOMER SIDE (anonymous)
+# ------------------------
+with st.expander("📈 Customer Retention Rankings — definición de métricas", expanded=False):
+    st.markdown("""
+**Retention Score**  
+Combina 4 factores en un puntaje único:  
+- Revenue (35%) → `total_revenue` (z-score con winsorización).  
+- Frequency (25%) → `n_orders` (z-score).  
+- Recency (25%) → días desde `last_sale` (z-score invertido).  
+- Regularity (15%) → `active_weeks / weeks_span` (densidad semanal).
+
+**Notas**  
+- El rango de fechas es **inicio inclusivo** y **fin exclusivo** (+1 día internamente).  
+- La recencia se mide respecto a la **fecha de referencia** (*as-of date*).  
+- Los nombres y métricas se normalizan para consistencia visual y cálculo.
+""")
 
 # ------------------------
 # CUSTOMER RANKING
@@ -457,6 +466,48 @@ else:
         st.altair_chart(chart, use_container_width=True)
 
 # ------------------------
+# EXPLANATION: SALES REP (anonymous)
+# ------------------------
+with st.expander("🔎 Columnas y su interpretación (Sales Rep)", expanded=False):
+    st.markdown("""
+**Sales Rep**  
+Nombre del representante de ventas (formato Title Case normalizado).
+
+**Active Customers**  
+Número de clientes distintos que compraron algo en el rango seleccionado.  
+👉 Ejemplo: un rep con 20 clientes activos vs. otro con 3.
+
+**Total Revenue**  
+Suma total de ventas (`total_revenue`) del rep en el rango.  
+👉 Ejemplo: un rep puede generar **$1,500,000**, otro **$300**.
+
+**Avg Retention Score**  
+Promedio ponderado del Retention Score de cada cliente (ponderado por revenue).  
+El Retention Score combina cuatro factores:
+- Revenue (35%)
+- Frequency (25%)
+- Recency (25%)
+- Regularity (15%)
+
+**Avg Regularity**  
+Promedio ponderado del ratio de regularidad semanal.  
+Regularity = semanas activas ÷ semanas del período.  
+👉 90% ≈ compras casi semanales; 60% ≈ más esporádicas.
+
+**Avg Recency Days**  
+Promedio ponderado de la recencia (días desde la última compra hasta el *as-of date*).  
+👉 Menor = mejor (más reciente).
+
+**Rank Score**  
+Puntaje para ordenar reps:
+- 50% Avg Retention Score
+- 30% posición relativa en Total Revenue
+- 20% posición relativa en Active Customers
+
+👉 Mezcla calidad (retención) y volumen (ventas/clientes). Un rep puede liderar aunque no tenga el mayor revenue si sus clientes son más constantes y recientes.
+""")
+
+# ------------------------
 # SALES REP RANKING
 # ------------------------
 st.subheader("🧑‍💼 Sales Rep Retention Rankings")
@@ -468,7 +519,7 @@ else:
     rep_show["sales_rep"] = rep_show["sales_rep"].astype(str).str.title()
 
     rep_show = _round_cols(rep_show, {
-        "avg_retention_score": 4,  # mantén precisión, lo mostraremos como %
+        "avg_retention_score": 4,  # numerical; display as % below
         "avg_recency_days": 1,
         "rank_score": 6
     })
@@ -478,11 +529,10 @@ else:
     rep_show = rep_show[rep_cols]
     rep_show_disp = _title_cols(rep_show)
 
-    # 👇 “promedios como porcentaje”: mostramos Avg Retention Score como %
     rep_styles = {
         "Active Customers": "{:,.0f}",
         "Total Revenue": "${:,.0f}",
-        "Avg Retention Score": "{:.2%}",   # display only (score no acotado)
+        "Avg Retention Score": "{:.2%}",  # display as percentage
         "Avg Regularity": "{:.2%}",
         "Avg Recency Days": "{:,.1f}",
         "Rank Score": "{:.6f}",
@@ -543,6 +593,6 @@ if rep_sel_disp:
 st.markdown(f"""
 **Notes**
 - `Recency` measured **as of {as_of_date.date()}** (adaptive: today if the range reaches today; otherwise range end).
-- `Avg Retention Score` is a composite score shown here **as % for display only** (can exceed 100%).
-- Regularity metrics are strictly computed **within the selected range**.
+- Percentages are **display formats**; underlying numeric values are kept for correct sorting.
+- Regularity/Frequency are computed strictly **within the selected range**.
 """)
