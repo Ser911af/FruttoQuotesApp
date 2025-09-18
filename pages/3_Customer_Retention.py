@@ -2,14 +2,12 @@
 # Customer Retention Rankings — by Company and by Sales Rep
 # Keeps: Login + sales DB access (Supabase/Azure) with schema similar to `ventas_frutto`
 
-import os
-import math
 import re
-import datetime as dt
+import math
 from typing import Optional
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 # ✅ Login (required before loading data)
@@ -18,7 +16,6 @@ from simple_auth import ensure_login, logout_button
 user = ensure_login()
 with st.sidebar:
     logout_button()
-
 st.caption(f"Session: {user}")
 
 # Optional: Altair for charts
@@ -52,7 +49,7 @@ Location filter uses **Lot Location**.
 """)
 
 # ------------------------
-# HELPERS
+# HELPERS (logic)
 # ------------------------
 def _normalize_txt(s: Optional[str]) -> str:
     if s is None:
@@ -102,43 +99,44 @@ def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce").round(n)
     return df
 
-def _money_fmt0(x):  # $12,345
-    return f"${x:,.0f}" if pd.notna(x) else ""
+# per-cell formatters to strings (robust fallback)
+def _fmt_money0_series(s: pd.Series) -> pd.Series:
+    return s.apply(lambda x: f"${x:,.0f}" if pd.notna(x) else "")
 
-def _money_fmt2(x):  # $12,345.67
-    return f"${x:,.2f}" if pd.notna(x) else ""
+def _fmt_money2_series(s: pd.Series) -> pd.Series:
+    return s.apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "")
 
-def _pct_fmt2(x):    # 12.34% from 0.1234
-    return f"{(x*100):.2f}%" if pd.notna(x) else ""
+def _fmt_int_series(s: pd.Series) -> pd.Series:
+    return s.apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
 
-def _dataframe_pretty(df: pd.DataFrame, money0: list[str] = None, money2: list[str] = None,
-                      pct2: list[str] = None, ints: list[str] = None, floats2: list[str] = None):
+def _fmt_float2_series(s: pd.Series) -> pd.Series:
+    return s.apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "")
+
+def _fmt_pct2_series_from_ratio(s: pd.Series) -> pd.Series:
+    return s.apply(lambda x: f"{(x*100):.2f}%" if pd.notna(x) else "")
+
+def _format_df_strings(df: pd.DataFrame,
+                       money0=None, money2=None, ints=None, floats2=None, pct2=None) -> pd.DataFrame:
     """
-    Apply formats with Styler and hide index. Does not mutate original df.
+    Fallback: returns a COPY with formatted string columns for display.
     """
     money0 = money0 or []
     money2 = money2 or []
-    pct2   = pct2 or []
-    ints   = ints or []
+    ints    = ints or []
     floats2 = floats2 or []
-
-    sty = df.style
+    pct2    = pct2 or []
+    out = df.copy()
     for c in money0:
-        if c in df.columns: sty = sty.format({c: _money_fmt0})
+        if c in out.columns: out[c] = _fmt_money0_series(pd.to_numeric(out[c], errors="coerce"))
     for c in money2:
-        if c in df.columns: sty = sty.format({c: _money_fmt2})
-    for c in pct2:
-        if c in df.columns: sty = sty.format({c: _pct_fmt2})
+        if c in out.columns: out[c] = _fmt_money2_series(pd.to_numeric(out[c], errors="coerce"))
     for c in ints:
-        if c in df.columns: sty = sty.format({c: "{:,.0f}"})
+        if c in out.columns: out[c] = _fmt_int_series(pd.to_numeric(out[c], errors="coerce"))
     for c in floats2:
-        if c in df.columns: sty = sty.format({c: "{:,.2f}"})
-
-    try:
-        sty = sty.hide(axis="index")
-    except Exception:
-        pass
-    return sty
+        if c in out.columns: out[c] = _fmt_float2_series(pd.to_numeric(out[c], errors="coerce"))
+    for c in pct2:
+        if c in out.columns: out[c] = _fmt_pct2_series_from_ratio(pd.to_numeric(out[c], errors="coerce"))
+    return out
 
 # ------------------------
 # SALES LOADER (ventas_frutto)
@@ -153,14 +151,15 @@ def load_sales() -> pd.DataFrame:
     sb = _load_supabase_client("supabase_sales")
     if sb:
         table_name = st.secrets.get("supabase_sales", {}).get("table", "ventas_frutto")
-        rows, limit, offset = [], 2000, 0
+        rows, limit, offset = [], 1000, 0
         while True:
             q = sb.table(table_name).select("*").range(offset, offset + limit - 1).execute()
             data = q.data or []
             rows.extend(data)
-            if len(data) < limit:
+            got = len(data)
+            if got < limit:
                 break
-            offset += limit
+            offset += got  # ✅ advance by what we actually received
         df = pd.DataFrame(rows)
     else:
         # 2) MSSQL (optional)
@@ -198,7 +197,7 @@ def load_sales() -> pd.DataFrame:
         "vendor": ["vendor", "shipper", "supplier"],
         "source": ["source"],
         "lot_location": ["lot_location"],
-        "oficina": ["oficina"],  # kept for completeness, not used in filters
+        "oficina": ["oficina"],  # kept for completeness
         "number_market": ["number_market"],
         "quantity": ["quantity", "qty"],
         "cost_per_unit": ["cost_per_unit"],
@@ -454,6 +453,8 @@ with st.sidebar:
 # DATA
 # ------------------------
 sdf = load_sales()
+
+# TOP METRICS
 col1, col2 = st.columns(2)
 with col1:
     st.metric("Sales records", value=len(sdf))
@@ -495,34 +496,31 @@ else:
 
     # Dates + rounding
     cust_show = _fmt_dates(cust_show, ["first_sale", "last_sale"])
-    cust_show = _round_cols(cust_show, {
-        "retention_score": 3  # keep 3 decimals for the composite
-    })
+    cust_show = _round_cols(cust_show, {"retention_score": 3})
 
     # Order and sweet headers
     cust_cols = ["customer","total_revenue","n_orders","aov","total_qty",
                  "last_sale","recency_days","active_weeks","weeks_span","regularity_ratio","retention_score"]
     cust_show = cust_show[cust_cols]
-    cust_show = _title_cols(cust_show)
+    cust_show_disp = _title_cols(cust_show)
 
-    # Percentage display for Regularity Ratio
-    st.dataframe(
-        _dataframe_pretty(
-            cust_show,
-            money0=["Total Revenue"],
-            money2=["Aov"],
-            ints=["N Orders","Total Qty","Recency Days","Active Weeks","Weeks Span"],
-            pct2=["Regularity Ratio"],                  # ← shows like 85.71%
-            floats2=["Retention Score"]
-        ),
-        use_container_width=True
+    # Fallback to formatted strings
+    cust_show_fmt = _format_df_strings(
+        cust_show_disp,
+        money0=["Total Revenue"],
+        money2=["Aov"],
+        ints=["N Orders","Total Qty","Recency Days","Active Weeks","Weeks Span"],
+        pct2=["Regularity Ratio"],
+        floats2=["Retention Score"]
     )
+    st.dataframe(cust_show_fmt, use_container_width=True)
 
+    # Chart uses numeric df (not the formatted strings)
     if ALTAIR_OK and len(cust_show) > 0:
         chart = alt.Chart(cust_show.head(25)).mark_bar().encode(
-            x=alt.X("Retention Score:Q", title="Retention Score"),
-            y=alt.Y("Customer:N", sort="-x", title="Customer"),
-            tooltip=["Customer","Total Revenue","N Orders","Recency Days","Regularity Ratio","Retention Score"]
+            x=alt.X("retention_score:Q", title="Retention Score"),
+            y=alt.Y("customer:N", sort="-x", title="Customer"),
+            tooltip=["customer","total_revenue","n_orders","recency_days","regularity_ratio","retention_score"]
         ).properties(height=500)
         st.altair_chart(chart, use_container_width=True)
 
@@ -540,31 +538,29 @@ else:
     # Rounding
     rep_show = _round_cols(rep_show, {
         "avg_retention_score": 3,
-        "avg_regency_days": 1 if "avg_regency_days" in rep_show.columns else 1,
+        "avg_recency_days": 1,
         "rank_score": 6
     })
 
     rep_cols = ["sales_rep","active_customers","total_revenue",
                 "avg_retention_score","avg_regularity","avg_recency_days","rank_score"]
     rep_show = rep_show[rep_cols]
-    rep_show = _title_cols(rep_show)
+    rep_show_disp = _title_cols(rep_show)
 
-    st.dataframe(
-        _dataframe_pretty(
-            rep_show,
-            money0=["Total Revenue"],
-            ints=["Active Customers"],
-            pct2=["Avg Regularity"],                    # ← percentage
-            floats2=["Avg Retention Score","Avg Recency Days","Rank Score"]
-        ),
-        use_container_width=True
+    rep_show_fmt = _format_df_strings(
+        rep_show_disp,
+        money0=["Total Revenue"],
+        ints=["Active Customers"],
+        pct2=["Avg Regularity"],
+        floats2=["Avg Retention Score","Avg Recency Days","Rank Score"]
     )
+    st.dataframe(rep_show_fmt, use_container_width=True)
 
     if ALTAIR_OK and len(rep_show) > 0:
         chart2 = alt.Chart(rep_show.head(20)).mark_bar().encode(
-            x=alt.X("Rank Score:Q", title="Rank Score"),
-            y=alt.Y("Sales Rep:N", sort="-x", title="Sales Rep"),
-            tooltip=["Sales Rep","Active Customers","Total Revenue","Avg Retention Score","Avg Regularity","Avg Recency Days","Rank Score"]
+            x=alt.X("rank_score:Q", title="Rank Score"),
+            y=alt.Y("sales_rep:N", sort="-x", title="Sales Rep"),
+            tooltip=["sales_rep","active_customers","total_revenue","avg_retention_score","avg_regularity","avg_recency_days","rank_score"]
         ).properties(height=420)
         st.altair_chart(chart2, use_container_width=True)
 
@@ -572,11 +568,18 @@ else:
 # CUSTOMERS BY SALES REP (pretty)
 # ------------------------
 st.subheader("🔎 Customers by Sales Rep")
-all_reps = sorted([r for r in sdf_f["sales_rep_c"].dropna().unique().tolist() if r])
-rep_sel = st.selectbox("Choose a Sales Rep", options=[""] + all_reps, index=0, placeholder="Select...")
 
-if rep_sel:
-    cr = customers_by_rep(sdf_f, start_date, end_date, rep_sel)
+# Build mapping display -> normalized (Title Case options in the UI)
+rep_map_df = sdf_f[["sales_rep_c","sales_rep_disp"]].drop_duplicates()
+rep_map_df = rep_map_df[rep_map_df["sales_rep_c"].notna() & (rep_map_df["sales_rep_c"] != "")]
+rep_options = [""] + sorted(rep_map_df["sales_rep_disp"].dropna().unique().tolist())
+rep_sel_disp = st.selectbox("Choose a Sales Rep", options=rep_options, index=0, placeholder="Select...")
+
+if rep_sel_disp:
+    # Map display back to normalized key
+    rep_norm = rep_map_df.loc[rep_map_df["sales_rep_disp"] == rep_sel_disp, "sales_rep_c"].iloc[0]
+
+    cr = customers_by_rep(sdf_f, start_date, end_date, rep_norm)
     if cr.empty:
         st.info("This Sales Rep has no customers in the selected range.")
     else:
@@ -593,19 +596,17 @@ if rep_sel:
         cr_cols = ["customer","total_revenue","n_orders","aov","last_sale","recency_days",
                    "active_weeks","weeks_span","regularity_ratio","retention_score"]
         cr = cr[cr_cols]
-        cr = _title_cols(cr)
+        cr_disp = _title_cols(cr)
 
-        st.dataframe(
-            _dataframe_pretty(
-                cr,
-                money0=["Total Revenue"],
-                money2=["Aov"],
-                ints=["N Orders","Recency Days","Active Weeks","Weeks Span"],
-                pct2=["Regularity Ratio"],              # ← percentage
-                floats2=["Retention Score"]
-            ),
-            use_container_width=True
+        cr_fmt = _format_df_strings(
+            cr_disp,
+            money0=["Total Revenue"],
+            money2=["Aov"],
+            ints=["N Orders","Recency Days","Active Weeks","Weeks Span"],
+            pct2=["Regularity Ratio"],
+            floats2=["Retention Score"]
         )
+        st.dataframe(cr_fmt, use_container_width=True)
 
 # ------------------------
 # NOTES
