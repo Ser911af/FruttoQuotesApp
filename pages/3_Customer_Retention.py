@@ -101,6 +101,13 @@ def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce").round(n)
     return df
 
+def _styled_table(df_disp: pd.DataFrame, styles: dict) -> "pd.io.formats.style.Styler":
+    """
+    Return a pandas Styler with per-column formats.
+    Column keys must match the **display** names (after Title Case).
+    """
+    return df_disp.style.format(styles, na_rep="")
+
 # ------------------------
 # SALES LOADER (ventas_frutto)
 # ------------------------
@@ -309,7 +316,7 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
 
     return agg
 
-# ---- New: pair-level metrics for (rep, customer) in rep ranking ----
+# ---- Pair-level metrics for (rep, customer) in rep ranking ----
 def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """
     Sales Rep ranking using ALL customers they touched in the range.
@@ -362,17 +369,22 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     grp = (rc.groupby("sales_rep", dropna=False)
              .apply(lambda g: pd.Series({
                  "avg_regularity":   np.average(g["regularity_pair"].fillna(0), weights=g["w"]),
-                 "avg_recency_days": np.average(g["recency_days_pair"].fillna(g["recency_days_pair"].median() if np.isfinite(np.nanmedian(g["recency_days_pair"])) else 0),
-                                               weights=g["w"])
+                 "avg_recency_days": np.average(
+                     g["recency_days_pair"].fillna(
+                         g["recency_days_pair"].median() if np.isfinite(np.nanmedian(g["recency_days_pair"])) else 0
+                     ),
+                     weights=g["w"]
+                 )
              }))
              .reset_index())
 
-    # Totals per rep
-    rep_totals = (rep_cust.groupby("sales_rep", dropna=False)
+    # Totals per rep  ✅ (usar sales_rep_c aquí y renombrar)
+    rep_totals = (rep_cust.groupby("sales_rep_c", dropna=False)
                     .agg(total_revenue=("rev","sum"),
                          total_qty=("qty","sum"),
                          active_customers=("customer_c","nunique"))
-                    .reset_index())
+                    .reset_index()
+                    .rename(columns={"sales_rep_c": "sales_rep"}))
 
     # avg_retention_score as revenue-weighted average of customer scores (range-level)
     cust_all = make_retention_metrics(d, start, end).rename(columns={"customer":"customer_c"})
@@ -398,7 +410,7 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     rep = rep.sort_values(["rank_score","total_revenue"], ascending=[False, False]).reset_index(drop=True)
     return rep
 
-# ---- New: customers_by_rep only uses that rep's own sales (pair-consistent) ----
+# ---- Customers by Sales Rep: only that rep's own sales (pair-consistent) ----
 def customers_by_rep(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, rep: str) -> pd.DataFrame:
     """
     Customer ranking for a given Sales Rep computed ONLY from that rep's own sales in [start, end).
@@ -423,7 +435,7 @@ with st.sidebar:
     # Date range (default: last 90 days, Bogota timezone)
     today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
     default_start = (today_bo - pd.Timedelta(days=90)).tz_localize(None)
-    default_end = today_bo.tz_localize(None)  # default end is "today"; +1 is applied only after user picks
+    default_end = today_bo.tz_localize(None)  # default end is "today"; +1 is applied after user picks
 
     date_range = st.date_input("Date range", value=(default_start, default_end))
     if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -472,7 +484,7 @@ if sdf_f.empty:
     st.stop()
 
 # ------------------------
-# CUSTOMER RANKING (numeric + column_config for proper sorting)
+# CUSTOMER RANKING (numeric + Styler for formatting)
 # ------------------------
 st.subheader("🏢 Customer Retention Rankings")
 cust_rank = make_retention_metrics(sdf_f, start_date, end_date)
@@ -497,24 +509,18 @@ else:
     cust_show = cust_show[cust_cols]
     cust_show_disp = _title_cols(cust_show)
 
-    st.dataframe(
-        cust_show_disp,
-        use_container_width=True,
-        column_config={
-            "Customer": st.column_config.TextColumn(),
-            "Total Revenue": st.column_config.NumberColumn(format="$%,d"),
-            "N Orders": st.column_config.NumberColumn(format="%,d"),
-            "Aov": st.column_config.NumberColumn(format="$%,.2f"),
-            "Total Qty": st.column_config.NumberColumn(format="%,d"),
-            "Last Sale": st.column_config.TextColumn(),
-            "Recency Days": st.column_config.NumberColumn(format="%,d"),
-            "Active Weeks": st.column_config.NumberColumn(format="%,d"),
-            "Weeks Span": st.column_config.NumberColumn(format="%,d"),
-            "Regularity Ratio": st.column_config.NumberColumn(format="%.2f%%"),  # ratio 0–1 shown as %
-            "Retention Score": st.column_config.NumberColumn(format="%.3f"),
-        },
-        hide_index=True,
-    )
+    cust_styles = {
+        "Total Revenue": "${:,.0f}",
+        "N Orders": "{:,.0f}",
+        "Aov": "${:,.2f}",
+        "Total Qty": "{:,.0f}",
+        "Recency Days": "{:,.0f}",
+        "Active Weeks": "{:,.0f}",
+        "Weeks Span": "{:,.0f}",
+        "Regularity Ratio": "{:.2%}",
+        "Retention Score": "{:.3f}",
+    }
+    st.dataframe(_styled_table(cust_show_disp, cust_styles), use_container_width=True, hide_index=True)
 
     if ALTAIR_OK and len(cust_show) > 0:
         chart = alt.Chart(cust_show.head(25)).mark_bar().encode(
@@ -525,7 +531,7 @@ else:
         st.altair_chart(chart, use_container_width=True)
 
 # ------------------------
-# SALES REP RANKING (numeric + column_config)
+# SALES REP RANKING (numeric + Styler)
 # ------------------------
 st.subheader("🧑‍💼 Sales Rep Retention Rankings")
 rep_rank = make_salesrep_rankings(sdf_f, start_date, end_date)
@@ -547,20 +553,15 @@ else:
     rep_show = rep_show[rep_cols]
     rep_show_disp = _title_cols(rep_show)
 
-    st.dataframe(
-        rep_show_disp,
-        use_container_width=True,
-        column_config={
-            "Sales Rep": st.column_config.TextColumn(),
-            "Active Customers": st.column_config.NumberColumn(format="%,d"),
-            "Total Revenue": st.column_config.NumberColumn(format="$%,d"),
-            "Avg Retention Score": st.column_config.NumberColumn(format="%.3f"),
-            "Avg Regularity": st.column_config.NumberColumn(format="%.2f%%"),
-            "Avg Recency Days": st.column_config.NumberColumn(format="%,.1f"),
-            "Rank Score": st.column_config.NumberColumn(format="%.6f"),
-        },
-        hide_index=True,
-    )
+    rep_styles = {
+        "Active Customers": "{:,.0f}",
+        "Total Revenue": "${:,.0f}",
+        "Avg Retention Score": "{:.3f}",
+        "Avg Regularity": "{:.2%}",
+        "Avg Recency Days": "{:,.1f}",
+        "Rank Score": "{:.6f}",
+    }
+    st.dataframe(_styled_table(rep_show_disp, rep_styles), use_container_width=True, hide_index=True)
 
     if ALTAIR_OK and len(rep_show) > 0:
         chart2 = alt.Chart(rep_show.head(20)).mark_bar().encode(
@@ -571,7 +572,7 @@ else:
         st.altair_chart(chart2, use_container_width=True)
 
 # ------------------------
-# CUSTOMERS BY SALES REP (pair-consistent, numeric + column_config)
+# CUSTOMERS BY SALES REP (pair-consistent, numeric + Styler)
 # ------------------------
 st.subheader("🔎 Customers by Sales Rep")
 
@@ -604,23 +605,17 @@ if rep_sel_disp:
         cr = cr[cr_cols]
         cr_disp = _title_cols(cr)
 
-        st.dataframe(
-            cr_disp,
-            use_container_width=True,
-            column_config={
-                "Customer": st.column_config.TextColumn(),
-                "Total Revenue": st.column_config.NumberColumn(format="$%,d"),
-                "N Orders": st.column_config.NumberColumn(format="%,d"),
-                "Aov": st.column_config.NumberColumn(format="$%,.2f"),
-                "Last Sale": st.column_config.TextColumn(),
-                "Recency Days": st.column_config.NumberColumn(format="%,d"),
-                "Active Weeks": st.column_config.NumberColumn(format="%,d"),
-                "Weeks Span": st.column_config.NumberColumn(format="%,d"),
-                "Regularity Ratio": st.column_config.NumberColumn(format="%.2f%%"),
-                "Retention Score": st.column_config.NumberColumn(format="%.3f"),
-            },
-            hide_index=True,
-        )
+        cr_styles = {
+            "Total Revenue": "${:,.0f}",
+            "N Orders": "{:,.0f}",
+            "Aov": "${:,.2f}",
+            "Recency Days": "{:,.0f}",
+            "Active Weeks": "{:,.0f}",
+            "Weeks Span": "{:,.0f}",
+            "Regularity Ratio": "{:.2%}",
+            "Retention Score": "{:.3f}",
+        }
+        st.dataframe(_styled_table(cr_disp, cr_styles), use_container_width=True, hide_index=True)
 
 # ------------------------
 # NOTES
