@@ -289,35 +289,47 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
     if d.empty:
         return pd.DataFrame()
 
+    # Métricas de retención por cliente en el MISMO rango/filtrado
     cust = make_retention_metrics(df, start, end)
     if cust.empty:
         return pd.DataFrame()
     cust = cust.rename(columns={"customer": "customer_c"})
 
-    # Revenue per (rep, customer) in the range
+    # Revenue por (rep, cliente) en el rango
     rep_cust = (d.groupby(["sales_rep_c", "customer_c"], dropna=False)
                   .agg(rev=("total_revenue","sum"),
                        qty=("quantity","sum"))
                   .reset_index())
 
-    # Totals per rep
-    rep_totals = (rep_cust.groupby("sales_rep_c")
+    # Opcional: excluir registros sin rep
+    rep_cust = rep_cust[rep_cust["sales_rep_c"].notna() & (rep_cust["sales_rep_c"] != "")]
+
+    # Totales por rep
+    rep_totals = (rep_cust.groupby("sales_rep_c", dropna=False)
                     .agg(total_revenue=("rev","sum"),
                          total_qty=("qty","sum"),
                          active_customers=("customer_c","nunique"))
                     .reset_index()
                     .rename(columns={"sales_rep_c":"sales_rep"}))
 
-    # Weighted averages using (rep, customer) revenue
-    rc = rep_cust.merge(cust[["customer_c","retention_score","regularity_ratio","recency_days"]],
-                        on="customer_c", how="left")
+    # Join para promedios ponderados
+    rc = rep_cust.merge(
+        cust[["customer_c","retention_score","regularity_ratio","recency_days"]],
+        on="customer_c", how="left"
+    )
+
+    # Renombrar aquí para que exista 'sales_rep' antes del groupby
+    rc = rc.rename(columns={"sales_rep_c": "sales_rep"})
     rc["w"] = rc["rev"].clip(lower=0) + 1e-9
 
-    grp = (rc.groupby("sales_rep")
+    grp = (rc.groupby("sales_rep", dropna=False)
              .apply(lambda g: pd.Series({
                  "avg_retention_score": np.average(g["retention_score"].fillna(0), weights=g["w"]),
                  "avg_regularity":     np.average(g["regularity_ratio"].fillna(0), weights=g["w"]),
-                 "avg_recency_days":   np.average(g["recency_days"].fillna(g["recency_days"].median() or 0), weights=g["w"])
+                 "avg_recency_days":   np.average(
+                     g["recency_days"].fillna(g["recency_days"].median() if np.isfinite(np.nanmedian(g["recency_days"])) else 0),
+                     weights=g["w"]
+                 )
              }))
              .reset_index())
 
@@ -325,7 +337,7 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
         "avg_retention_score": 0, "avg_regularity": 0, "avg_recency_days": 0
     })
 
-    # Composite rank (tweak as needed)
+    # Rank combinado (ajustable)
     rep["rank_score"] = (
         0.5 * rep["avg_retention_score"] +
         0.3 * rep["total_revenue"].rank(pct=True, method="average") +
@@ -334,6 +346,7 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
 
     rep = rep.sort_values(["rank_score","total_revenue"], ascending=[False, False]).reset_index(drop=True)
     return rep
+
 
 def customers_by_rep(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, rep: str) -> pd.DataFrame:
     """Customer ranking for a given Sales Rep (based on the same retention metrics)."""
