@@ -1,5 +1,6 @@
-# pages/5_VendorProduct_Customers.py
-# Vendor–Product → Customers Explorer
+# Vendor × Product → Customers — Who bought what from whom?
+# Streamlit page to answer: "qué clientes han comprado de ese vendor y ese producto en específico"
+# Author: Sergio + Copiloto (con cafeína y pandas)
 
 import re
 import math
@@ -9,13 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from simple_auth import ensure_login, logout_button
-
-user = ensure_login()
-with st.sidebar:
-    logout_button()
-st.caption(f"Session: {user}")
-
+# Optional deps
 try:
     import altair as alt
     ALTAIR_OK = True
@@ -30,12 +25,14 @@ except Exception:
 # ------------------------
 # PAGE CONFIG
 # ------------------------
-st.set_page_config(page_title="Vendor–Product → Customers", page_icon="🧭", layout="wide")
-st.title("🧭 Vendor–Product → Customers (Compras/Ventas)")
+st.set_page_config(page_title="Vendor × Product → Customers", page_icon="🧾", layout="wide")
+st.title("🧾 Vendor × Product → Customers")
+st.caption("Encuentra qué clientes compraron un *producto específico* de un *vendor* dado, con métricas y detalle.")
 
 # ------------------------
 # HELPERS
 # ------------------------
+
 def _normalize_txt(s: Optional[str]) -> str:
     if s is None:
         return ""
@@ -44,13 +41,36 @@ def _normalize_txt(s: Optional[str]) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-def _coerce_bool(x):
-    if isinstance(x, (bool, np.bool_)):
-        return bool(x)
-    if x is None or (isinstance(x, float) and math.isnan(x)):
-        return False
-    s = str(x).strip().lower()
-    return s in {"true", "t", "1", "yes", "y", "og"}
+
+def _winsorized_z(x: pd.Series) -> pd.Series:
+    x = pd.to_numeric(x, errors="coerce").fillna(0)
+    # soft winsorization at 2–98%
+    lo, hi = x.quantile(0.02), x.quantile(0.98)
+    xw = x.clip(lower=lo, upper=hi)
+    mu, sd = xw.mean(), xw.std(ddof=0)
+    return (x - mu) / (sd + 1e-9)
+
+
+def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
+    df = df.copy()
+    for c, n in spec.items():
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").round(n)
+    return df
+
+
+def _fmt_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    df = df.copy()
+    for c in cols:
+        if c in df.columns:
+            s = pd.to_datetime(df[c], errors="coerce")
+            df[c] = s.dt.strftime("%Y-%m-%d").fillna("")
+    return df
+
+
+def _styled_table(df_disp: pd.DataFrame, styles: dict) -> "pd.io.formats.style.Styler":
+    return df_disp.style.format(styles, na_rep="")
+
 
 def _load_supabase_client(secret_key: str):
     sec = st.secrets.get(secret_key, None)
@@ -62,45 +82,12 @@ def _load_supabase_client(secret_key: str):
         return None
     return create_client(url, key)
 
-def _title_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    mapping = {c: c.replace("_", " ").title() for c in df.columns}
-    return df.rename(columns=mapping)
-
-def _fmt_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    df = df.copy()
-    for c in cols:
-        if c in df.columns:
-            s = pd.to_datetime(df[c], errors="coerce")
-            df[c] = s.dt.strftime("%Y-%m-%d").fillna("")
-    return df
-
-def _round_cols(df: pd.DataFrame, spec: dict[str, int]) -> pd.DataFrame:
-    df = df.copy()
-    for c, n in spec.items():
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").round(n)
-    return df
-
-def _styled_table(df_disp: pd.DataFrame, styles: dict) -> "pd.io.formats.style.Styler":
-    # Return a Styler so Streamlit formats strings without converting data types
-    return df_disp.style.format(styles, na_rep="")
-
-def _week_key(ts: pd.Timestamp) -> str:
-    if pd.isna(ts):
-        return ""
-    iso = ts.isocalendar()
-    return f"{int(iso.year)}-W{int(iso.week):02d}"
 
 # ------------------------
-# SALES LOADER
+# SALES LOADER (extends alias map with product fields)
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def load_sales() -> pd.DataFrame:
-    """
-    Carga ventas desde Supabase (o error visible).
-    Estandariza alias para columnas clave e incluye dimensiones de producto.
-    """
     sb = _load_supabase_client("supabase_sales")
     if sb:
         table_name = st.secrets.get("supabase_sales", {}).get("table", "ventas_frutto")
@@ -124,25 +111,23 @@ def load_sales() -> pd.DataFrame:
     alias_map = {
         # Dates
         "reqs_date": ["reqs_date"],
-        "received_date": ["received_date", "date_received", "rec_date"],
+        "received_date": ["received_date"],
         "created_at": ["created_at"],
         # IDs
         "invoice_num": ["invoice_num", "invoice #", "invoice"],
-        "sales_order": ["sales_order", "so_number", "order_number"],
-        # Core dimensions
+        "sales_order": ["sales_order"],
+        # Dimensions
         "vendor": ["vendor", "shipper", "supplier"],
-        "customer": ["customer", "customer_name", "client", "buyer_name"],
         "buyer_assigned": ["buyer_assigned", "buyer_asigned", "buyer"],
-        "sales_rep": ["sales_rep", "cus_sales_rep"],
+        "customer": ["customer", "customer_name", "client", "cliente"],
+        "product": [
+            "product", "item", "item_name", "product_name", "desc", "description",
+            "sku", "upc", "gtin"
+        ],
         "lot_location": ["lot_location"],
-        # Product dimensions (robust aliases)
-        "product": ["product", "item", "commodity", "sku", "item_desc", "description", "product_name"],
-        "brand": ["brand"],
-        "pack": ["pack", "pack_size", "package"],
-        "variety": ["variety", "sub_commodity"],
         # Metrics
         "quantity": ["quantity", "qty"],
-        "total_revenue": ["total_revenue", "amount", "total"],
+        "total_revenue": ["total_revenue", "total", "line_total", "revenue"],
         "price_per_unit": ["price_per_unit", "sell_price", "unit_price", "price"],
     }
 
@@ -165,46 +150,24 @@ def load_sales() -> pd.DataFrame:
 
     # Canonical normalized keys
     sdf["vendor_c"] = sdf["vendor"].astype(str).map(_normalize_txt)
+    sdf["product_c"] = sdf["product"].astype(str).map(_normalize_txt)
     sdf["customer_c"] = sdf["customer"].astype(str).map(_normalize_txt)
-    sdf["buyer_c"] = sdf["buyer_assigned"].astype(str).map(_normalize_txt)
 
-    # Producto canónico: combinamos columna principal + variedad/brand/pack si existen
-    # para diferenciar "Roma Tomato 25lb" vs "Roma Tomato 10lb"
-    parts = []
-    for col in ["product", "variety", "brand", "pack"]:
-        if col in sdf.columns:
-            parts.append(sdf[col].astype(str))
-    if parts:
-        combo = parts[0]
-        for p in parts[1:]:
-            combo = combo.where(p.isna() | (p.astype(str).str.strip() == ""), combo + " | " + p.astype(str))
-    else:
-        combo = sdf["product"].astype(str)
-    sdf["product_full"] = combo.replace("nan", "").replace("None", "")
-
-    sdf["product_c"] = sdf["product_full"].astype(str).map(_normalize_txt)
-
-    # Display labels
+    # Display labels (Title Case)
     sdf["vendor_disp"] = sdf["vendor"].astype(str).str.title()
+    sdf["product_disp"] = sdf["product"].astype(str)
     sdf["customer_disp"] = sdf["customer"].astype(str).str.title()
-    sdf["product_disp"] = sdf["product_full"].astype(str).str.strip()
 
     # Unified date
     sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"]).fillna(sdf["created_at"])  # fallback chain
     sdf["date"] = pd.to_datetime(sdf["date"], errors="coerce")
 
-    # Order identifier: prefer invoice_num; if absent, fallback to SO or NaN
+    # Order identifier: prefer invoice_num; if absent, we'll count rows as proxy later
     sdf["order_id"] = sdf["invoice_num"].astype(str)
-    sdf.loc[sdf["order_id"].isin(["nan", "none", ""]), "order_id"] = np.nan
-    if sdf["order_id"].isna().all() and "sales_order" in sdf:
-        so = sdf["sales_order"].astype(str)
-        so = so.where(~so.isin(["nan", "none", ""]), np.nan)
-        sdf["order_id"] = so
-
-    # Useful derived
-    sdf["week_key"] = sdf["date"].apply(_week_key)
+    sdf.loc[sdf["order_id"].isin(["nan", "none", "", "NaT"]), "order_id"] = np.nan
 
     return sdf
+
 
 # ------------------------
 # SIDEBAR FILTERS
@@ -222,7 +185,9 @@ with st.sidebar:
     else:
         start_date, end_date = default_start, default_end + pd.Timedelta(days=1)
 
-# Adaptive as_of date
+    st.caption("Primero el vendor, luego el producto — como tacos y salsa.")
+
+# Adaptive as_of_date
 today_norm = pd.Timestamp.now(tz="America/Bogota").normalize().tz_localize(None)
 end_minus_1 = (end_date - pd.Timedelta(days=1)).normalize()
 as_of_date = min(today_norm, end_minus_1)
@@ -233,20 +198,19 @@ st.caption(f"Recency as-of: **{as_of_date.date()}**")
 # ------------------------
 sdf = load_sales()
 
-col1, col2, col3, col4 = st.columns(4)
-with col1:
+m1, m2, m3, m4 = st.columns(4)
+with m1:
     st.metric("Sales records", value=len(sdf))
-with col2:
+with m2:
     st.metric("Unique vendors", value=int(sdf["vendor_c"].nunique()) if not sdf.empty else 0)
-with col3:
+with m3:
     st.metric("Unique products", value=int(sdf["product_c"].nunique()) if not sdf.empty else 0)
-with col4:
+with m4:
     st.metric("Unique customers", value=int(sdf["customer_c"].nunique()) if not sdf.empty else 0)
 
 if sdf.empty:
     st.stop()
 
-# Date filter
 mask = (sdf["date"] >= start_date) & (sdf["date"] < end_date)
 sdf_f = sdf[mask].copy()
 st.caption(f"Filtered rows: {len(sdf_f)} in selected range.")
@@ -255,293 +219,176 @@ if sdf_f.empty:
     st.stop()
 
 # ------------------------
-# UI: CASCADING SELECTORS
+# UI: VENDOR → PRODUCT selectors (dependent)
 # ------------------------
-st.subheader("🎯 Selección Vendor y Producto")
+left, right = st.columns([1, 1])
+with left:
+    vend_opts = [""] + sorted(sdf_f["vendor_disp"].dropna().unique().tolist())
+    vendor_sel_disp = st.selectbox("Vendor", options=vend_opts, index=0, placeholder="Select...")
 
-# Vendor options
-vend_map = (
-    sdf_f[["vendor_c", "vendor_disp"]]
-    .drop_duplicates()
-    .sort_values("vendor_disp", kind="mergesort")
+if vendor_sel_disp:
+    vendor_norm = (
+        sdf_f.loc[sdf_f["vendor_disp"] == vendor_sel_disp, "vendor_c"].dropna().iloc[0]
+        if (sdf_f["vendor_disp"] == vendor_sel_disp).any()
+        else _normalize_txt(vendor_sel_disp)
+    )
+    vmask = sdf_f["vendor_c"] == vendor_norm
+    prods = sdf_f.loc[vmask, ["product_c", "product_disp"]].dropna().drop_duplicates()
+    # Keep product_disp as is (no Title Case; could be SKU-like)
+    prod_opts = [""] + sorted(prods["product_disp"].astype(str).unique().tolist())
+    with right:
+        product_sel_disp = st.selectbox("Product (de ese Vendor)", options=prod_opts, index=0, placeholder="Select...")
+else:
+    product_sel_disp = ""
+
+if not vendor_sel_disp or not product_sel_disp:
+    st.info("Selecciona un **Vendor** y un **Product** para ver los clientes.")
+    st.stop()
+
+# Canonical keys for selected options
+product_norm = (
+    sdf_f.loc[sdf_f["product_disp"] == product_sel_disp, "product_c"].dropna().iloc[0]
+    if (sdf_f["product_disp"] == product_sel_disp).any()
+    else _normalize_txt(product_sel_disp)
 )
-vend_options = [""] + vend_map["vendor_disp"].tolist()
-vend_disp = st.selectbox("Vendor", options=vend_options, index=0, placeholder="Selecciona un Vendor…")
 
-selected_vendor_c = ""
-if vend_disp:
-    selected_vendor_c = vend_map.loc[vend_map["vendor_disp"] == vend_disp, "vendor_c"].iloc[0]
+# Slice: rows for that (vendor, product)
+vp = sdf_f[(sdf_f["vendor_c"] == vendor_norm) & (sdf_f["product_c"] == product_norm)].copy()
+if vp.empty:
+    st.warning("Ese vendor no vendió ese producto en el rango seleccionado (o los nombres no coinciden).")
+    st.stop()
 
-# Product options filtered by vendor (si no hay vendor, lista global truncada para performance)
-if selected_vendor_c:
-    prod_map = (
-        sdf_f.loc[sdf_f["vendor_c"] == selected_vendor_c, ["product_c", "product_disp"]]
-        .drop_duplicates()
-        .sort_values("product_disp", kind="mergesort")
+# ------------------------
+# METRICS by CUSTOMER for (Vendor, Product)
+# ------------------------
+vp["week_key"] = vp["date"].dt.isocalendar().astype(str)
+
+# Orders: group by invoice if available
+if vp["order_id"].notna().any():
+    orders = vp.groupby(["customer_c", "order_id"], dropna=False).agg(
+        order_rev=("total_revenue", "sum")
+    ).reset_index()
+    orders_per_cust = orders.groupby("customer_c").agg(
+        n_orders=("order_id", "nunique"),
+        aov=("order_rev", "mean"),
     )
 else:
-    # fallback global top-N (por si quieren ver algo rápido)
-    prod_map = (
-        sdf_f[["product_c", "product_disp"]]
-        .value_counts()
-        .reset_index()
-        .sort_values(0, ascending=False)
-        .head(500)[["product_c", "product_disp"]]
-        .drop_duplicates()
+    orders_per_cust = vp.groupby("customer_c").agg(
+        n_orders=("date", "count"),
+        aov=("total_revenue", "mean"),
     )
 
-prod_options = [""] + prod_map["product_disp"].fillna("").tolist()
-prod_disp = st.selectbox("Producto (depende del Vendor)", options=prod_options, index=0, placeholder="Selecciona un Producto…")
+agg = vp.groupby("customer_c").agg(
+    customer_disp=("customer_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+    total_revenue=("total_revenue", "sum"),
+    total_qty=("quantity", "sum"),
+    first_sale=("date", "min"),
+    last_sale=("date", "max"),
+).join(orders_per_cust, how="left").fillna({"n_orders": 0, "aov": 0})
 
-selected_product_c = ""
-if prod_disp:
-    selected_product_c = prod_map.loc[prod_map["product_disp"] == prod_disp, "product_c"].iloc[0]
+# Recency
+agg["recency_days"] = (as_of_date - agg["last_sale"].dt.normalize()).dt.days
 
-# ------------------------
-# CORE: CUSTOMERS WHO BOUGHT (VENDOR, PRODUCT)
-# ------------------------
-st.subheader("👥 Customers que compraron el Vendor–Producto")
-def customers_for_vendor_product(df: pd.DataFrame, vendor_c: str, product_c: str) -> pd.DataFrame:
-    if not vendor_c or not product_c:
-        return pd.DataFrame()
+# Rankings (z-scores) — optional spice
+agg["z_rev"] = _winsorized_z(agg["total_revenue"])  # 60%
+agg["z_freq"] = _winsorized_z(agg["n_orders"])      # 40%
+agg["vp_rank_score"] = 0.6 * agg["z_rev"] + 0.4 * agg["z_freq"]
 
-    d = df[(df["vendor_c"] == vendor_c) & (df["product_c"] == product_c)].copy()
-    if d.empty:
-        return pd.DataFrame()
+cust_tbl = (
+    agg.reset_index()
+       .sort_values(["vp_rank_score", "total_revenue"], ascending=[False, False])
+)
 
-    # Orders: group by invoice if present; otherwise count rows
-    if d["order_id"].notna().any():
-        orders = d.groupby(["customer_c", "order_id"], dropna=False).agg(
-            order_rev=("total_revenue", "sum"),
-            order_qty=("quantity", "sum"),
-            order_price=("price_per_unit", "mean"),
-            last_date=("date", "max"),
-            first_date=("date", "min"),
-        ).reset_index()
-        by_cust = orders.groupby("customer_c").agg(
-            n_orders=("order_id", "nunique"),
-            total_revenue=("order_rev", "sum"),
-            total_qty=("order_qty", "sum"),
-            aov=("order_rev", "mean"),
-            last_purchase=("last_date", "max"),
-            first_purchase=("first_date", "min"),
-        )
-    else:
-        by_cust = d.groupby("customer_c").agg(
-            n_orders=("date", "count"),
-            total_revenue=("total_revenue", "sum"),
-            total_qty=("quantity", "sum"),
-            aov=("total_revenue", "mean"),
-            last_purchase=("date", "max"),
-            first_purchase=("date", "min"),
-        )
+# Display formatting
+cust_tbl = _fmt_dates(cust_tbl, ["first_sale", "last_sale"]).copy()
 
-    # Price metrics within the pair
-    price_stats = d.groupby("customer_c").agg(
-        avg_unit_price=("price_per_unit", "mean"),
-        median_unit_price=("price_per_unit", "median"),
-    )
+cdisp_cols = [
+    "customer_disp", "n_orders", "total_qty", "aov", "total_revenue",
+    "first_sale", "last_sale", "recency_days",
+]
 
-    # Recency
-    out = by_cust.join(price_stats, how="left")
-    out["recency_days"] = (as_of_date.normalize() - out["last_purchase"].dt.normalize()).dt.days
+cdisp = cust_tbl[cdisp_cols].rename(columns={
+    "customer_disp": "Customer",
+    "n_orders": "Orders",
+    "total_qty": "Qty",
+    "aov": "AOV",
+    "total_revenue": "Revenue",
+    "first_sale": "First Sale",
+    "last_sale": "Last Sale",
+    "recency_days": "Recency (days)",
+})
 
-    # Display labels
-    disp_map_c = d[["customer_c", "customer_disp"]].drop_duplicates()
-    out = (
-        out.reset_index()
-        .merge(disp_map_c, on="customer_c", how="left")
-        .rename(columns={"customer_disp": "customer"})
-        .sort_values(["total_revenue", "total_qty"], ascending=[False, False])
-        .reset_index(drop=True)
-    )
+styles = {
+    "Orders": "{:,.0f}",
+    "Qty": "{:,.0f}",
+    "AOV": "${:,.2f}",
+    "Revenue": "${:,.0f}",
+    "Recency (days)": "{:,.0f}",
+}
 
-    # Share dentro del Vendor–Producto (quién se lleva la tajada del pastel 🍰)
-    total_rev_pair = out["total_revenue"].sum()
-    out["rev_share_vendor_product"] = np.where(
-        total_rev_pair > 0, out["total_revenue"] / total_rev_pair, 0.0
-    )
+st.subheader("👥 Customers that bought it")
+st.dataframe(_styled_table(cdisp, styles), use_container_width=True, hide_index=True)
 
-    cols = [
-        "customer", "n_orders", "total_qty", "total_revenue",
-        "aov", "avg_unit_price", "median_unit_price",
-        "first_purchase", "last_purchase", "recency_days",
-        "rev_share_vendor_product",
-    ]
-    return out[cols]
+# Quick KPIs
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.metric("Customers", value=int(cust_tbl.shape[0]))
+with k2:
+    st.metric("Total Revenue", value=f"${cust_tbl['total_revenue'].sum():,.0f}")
+with k3:
+    st.metric("Units", value=f"{cust_tbl['total_qty'].sum():,.0f}")
+with k4:
+    st.metric("Orders", value=f"{int(cust_tbl['n_orders'].sum())}")
 
-def vendor_product_overview(df: pd.DataFrame, vendor_c: str, product_c: str) -> pd.DataFrame:
-    if not vendor_c or not product_c:
-        return pd.DataFrame()
-    d = df[(df["vendor_c"] == vendor_c) & (df["product_c"] == product_c)].copy()
-    if d.empty:
-        return pd.DataFrame()
-
-    # Totales y temporalidad
-    total_rev = d["total_revenue"].sum()
-    total_qty = d["quantity"].sum()
-    first_dt = d["date"].min()
-    last_dt = d["date"].max()
-    active_weeks = d["week_key"].nunique()
-    span_days = (last_dt.normalize() - first_dt.normalize()).days if pd.notna(first_dt) and pd.notna(last_dt) else 0
-    weeks_span = (span_days // 7) + 1 if span_days >= 0 else 0
-    regularity = (active_weeks / weeks_span) if weeks_span > 0 else np.nan
-
-    # #Orders
-    if d["order_id"].notna().any():
-        n_orders = d["order_id"].nunique()
-        aov = d.groupby("order_id")["total_revenue"].sum().mean()
-    else:
-        n_orders = len(d)
-        aov = d["total_revenue"].mean()
-
-    # Precio
-    avg_price = d["price_per_unit"].mean()
-    med_price = d["price_per_unit"].median()
-
-    # #Customers
-    n_customers = d["customer_c"].nunique()
-
-    ov = pd.DataFrame([{
-        "total_revenue": total_rev,
-        "total_qty": total_qty,
-        "n_orders": n_orders,
-        "aov": aov,
-        "avg_unit_price": avg_price,
-        "median_unit_price": med_price,
-        "first_sale": first_dt,
-        "last_sale": last_dt,
-        "recency_days": (as_of_date.normalize() - last_dt.normalize()).days if pd.notna(last_dt) else np.nan,
-        "active_weeks": active_weeks,
-        "weeks_span": weeks_span,
-        "regularity_ratio": np.clip(regularity, 0, 1) if pd.notna(regularity) else np.nan,
-        "n_customers": n_customers,
-    }])
-    return ov
-
-# Compute
-cust_tbl = customers_for_vendor_product(sdf_f, selected_vendor_c, selected_product_c)
-ov_tbl = vendor_product_overview(sdf_f, selected_vendor_c, selected_product_c)
-
-# Labels visibles
-if selected_vendor_c:
-    st.caption(f"Vendor seleccionado: **{vend_disp}**")
-if selected_product_c:
-    st.caption(f"Producto seleccionado: **{prod_disp}**")
-
-# Overview cards
-if not ov_tbl.empty:
-    o = _fmt_dates(ov_tbl.copy(), ["first_sale", "last_sale"])
-    o = _round_cols(o, {
-        "aov": 2, "avg_unit_price": 2, "median_unit_price": 2, "regularity_ratio": 4
-    })
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Total Revenue", f"${o['total_revenue'].iloc[0]:,.0f}")
-    c2.metric("Total Qty", f"{o['total_qty'].iloc[0]:,.0f}")
-    c3.metric("# Órdenes", f"{int(o['n_orders'].iloc[0])}")
-    c4.metric("Avg Unit Price", f"${o['avg_unit_price'].iloc[0]:,.2f}")
-    c5.metric("Clientes únicos", f"{int(o['n_customers'].iloc[0])}")
-    c6.metric("Recency (días)", f"{int(o['recency_days'].iloc[0]) if pd.notna(o['recency_days'].iloc[0]) else 0}")
-
-    with st.expander("Detalle Vendor–Producto", expanded=False):
-        o_disp = _title_cols(o[[
-            "total_revenue","total_qty","n_orders","aov","avg_unit_price","median_unit_price",
-            "first_sale","last_sale","recency_days","active_weeks","weeks_span","regularity_ratio","n_customers"
-        ]])
-        o_styles = {
-            "Total Revenue": "${:,.0f}",
-            "Total Qty": "{:,.0f}",
-            "N Orders": "{:,.0f}",
-            "Aov": "${:,.2f}",
-            "Avg Unit Price": "${:,.2f}",
-            "Median Unit Price": "${:,.2f}",
-            "Recency Days": "{:,.0f}",
-            "Active Weeks": "{:,.0f}",
-            "Weeks Span": "{:,.0f}",
-            "Regularity Ratio": "{:.2%}",
-            "N Customers": "{:,.0f}",
-        }
-        st.dataframe(_styled_table(o_disp, o_styles), use_container_width=True, hide_index=True)
-
-# Customers table
-if selected_vendor_c and selected_product_c:
-    if cust_tbl.empty:
-        st.info("No hay compras para ese Vendor–Producto en el rango seleccionado. (O el producto solo existe en universos paralelos 🪐)")
-    else:
-        t = cust_tbl.copy()
-        t = _fmt_dates(t, ["first_purchase", "last_purchase"])
-        t = _round_cols(t, {
-            "aov": 2, "avg_unit_price": 2, "median_unit_price": 2, "rev_share_vendor_product": 4
-        })
-        t = t.rename(columns={
-            "customer": "customer",
-            "n_orders": "n_orders",
-            "total_qty": "total_qty",
-            "total_revenue": "total_revenue",
-            "aov": "aov",
-            "avg_unit_price": "avg_unit_price",
-            "median_unit_price": "median_unit_price",
-            "first_purchase": "first_purchase",
-            "last_purchase": "last_purchase",
-            "recency_days": "recency_days",
-            "rev_share_vendor_product": "rev_share_vendor_product",
-        })
-
-        t_disp = _title_cols(t)
-        styles = {
-            "N Orders": "{:,.0f}",
-            "Total Qty": "{:,.0f}",
-            "Total Revenue": "${:,.0f}",
-            "Aov": "${:,.2f}",
-            "Avg Unit Price": "${:,.2f}",
-            "Median Unit Price": "${:,.2f}",
-            "Recency Days": "{:,.0f}",
-            "Rev Share Vendor Product": "{:.2%}",
-        }
-        st.dataframe(_styled_table(t_disp, styles), use_container_width=True, hide_index=True)
-
-        # Download
-        csv = t_disp.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Descargar CSV (Customers Vendor–Producto)", data=csv, file_name="customers_vendor_product.csv", mime="text/csv")
-
-        # Charts
-        if ALTAIR_OK:
-            top_n = min(25, len(t))
-            cA, cB = st.columns(2)
-            with cA:
-                chart_rev = alt.Chart(t.head(top_n)).mark_bar().encode(
-                    x=alt.X("total_revenue:Q", title="Revenue"),
-                    y=alt.Y("customer:N", sort="-x", title="Customer"),
-                    tooltip=["customer","n_orders","total_qty","total_revenue","aov","avg_unit_price","recency_days"]
-                ).properties(height=420)
-                st.altair_chart(chart_rev, use_container_width=True)
-            with cB:
-                chart_qty = alt.Chart(t.head(top_n)).mark_bar().encode(
-                    x=alt.X("total_qty:Q", title="Qty"),
-                    y=alt.Y("customer:N", sort="-x", title="Customer"),
-                    tooltip=["customer","n_orders","total_qty","total_revenue","avg_unit_price","recency_days"]
-                ).properties(height=420)
-                st.altair_chart(chart_qty, use_container_width=True)
+# Chart (top 25 by revenue)
+if ALTAIR_OK and len(cust_tbl) > 0:
+    chart = alt.Chart(cust_tbl.head(25)).mark_bar().encode(
+        x=alt.X("total_revenue:Q", title="Revenue"),
+        y=alt.Y("customer_disp:N", sort="-x", title="Customer"),
+        tooltip=["customer_disp", "n_orders", "total_qty", "aov", "total_revenue"],
+    ).properties(height=480)
+    st.altair_chart(chart, use_container_width=True)
 
 # ------------------------
-# EXPLICACIÓN
+# DETAIL: line items (for audits & exports)
 # ------------------------
-with st.expander("ℹ️ ¿Qué hace este módulo?", expanded=False):
-    st.markdown(
-        """
-**Objetivo:** Dado un *Vendor* y un *Producto* específico, listar **qué clientes** compraron ese par, con métricas clave:
+st.subheader("📄 Line Items (detalle)")
+cols_keep = [
+    "date", "invoice_num", "sales_order", "customer_disp", "price_per_unit", "quantity", "total_revenue",
+]
+ld = vp[cols_keep].copy()
+ld = _fmt_dates(ld, ["date"]).rename(columns={
+    "date": "Date",
+    "invoice_num": "Invoice",
+    "sales_order": "Sales Order",
+    "customer_disp": "Customer",
+    "price_per_unit": "Unit Price",
+    "quantity": "Qty",
+    "total_revenue": "Revenue",
+})
 
-- **n_orders**: número de órdenes (o filas si no hay `invoice_num`).
-- **total_qty** y **total_revenue** del par.
-- **AOV** (Average Order Value) dentro de ese par.
-- **Avg/Median Unit Price**: precio promedio/mediano.
-- **First/Last purchase** y **Recency (días)**.
-- **Rev Share Vendor Product**: % del revenue del par que aporta cada cliente.
+st.dataframe(
+    _styled_table(ld, {"Unit Price": "${:,.2f}", "Qty": "{:,.0f}", "Revenue": "${:,.2f}"}),
+    use_container_width=True,
+    hide_index=True,
+)
 
+# Export buttons
+csv1 = cdisp.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download customers CSV", data=csv1, file_name="customers_vendor_product.csv", mime="text/csv")
+
+csv2 = ld.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download line items CSV", data=csv2, file_name="line_items_vendor_product.csv", mime="text/csv")
+
+# ------------------------
+# NOTES
+# ------------------------
+st.markdown(
+    f"""
 **Notas**
 - El rango de fechas es **inicio inclusivo** y **fin exclusivo** (+1 día internamente).
-- La recencia se mide respecto a la **fecha de referencia** (*as-of date*).
-- Selectores en cascada: primero **Vendor**, luego **Producto** disponible para ese Vendor.
-- Las etiquetas muestran *Title Case*, pero la lógica usa claves normalizadas (`*_c`) para consistencia.
-        """
-    )
+- *Recency* medido **al {as_of_date.date()}**.
+- Los nombres se normalizan internamente (lower-case) para los joins/agrupaciones; se muestran "bonitos" para humanos.
+- Si no hay `invoice_num`, el conteo de órdenes usa filas como proxy (con cariño y transparencia).
+"""
+)
