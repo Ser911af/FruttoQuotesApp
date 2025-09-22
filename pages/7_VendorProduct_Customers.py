@@ -261,7 +261,12 @@ if vp.empty:
 # ------------------------
 # METRICS by CUSTOMER for (Vendor, Product)
 # ------------------------
-vp["week_key"] = vp["date"].dt.isocalendar().astype(str)
+wk = vp["date"].dt.isocalendar()
+vp["week_key"] = np.where(
+    vp["date"].notna(),
+    wk["year"].astype(int).astype(str) + "-W" + wk["week"].astype(int).astype(str).str.zfill(2),
+    ""
+)
 
 # Orders: group by invoice if available
 if vp["order_id"].notna().any():
