@@ -114,6 +114,7 @@ def load_sales() -> pd.DataFrame:
     alias_map = {
         # Dates
         "reqs_date": ["reqs_date"],
+        "most_recent_invoice_paid_date": ["most_recent_invoice_paid_date"],
         "received_date": ["received_date"],
         "created_at": ["created_at"],
         # IDs
@@ -143,26 +144,34 @@ def load_sales() -> pd.DataFrame:
     sdf = pd.DataFrame(std)
 
     # Types
-    for c in ["reqs_date", "received_date", "created_at"]:
+    for c in ["reqs_date", "most_recent_invoice_paid_date", "received_date", "created_at"]:
         sdf[c] = pd.to_datetime(sdf[c], errors="coerce")
     for c in ["quantity", "total_revenue", "price_per_unit"]:
         sdf[c] = pd.to_numeric(sdf[c], errors="coerce")
 
     # Canonical normalized keys
     sdf["vendor_c"] = sdf["vendor"].astype(str).map(_normalize_txt)
-    sdf["buyer_c"] = sdf["buyer_assigned"].astype(str).map(_normalize_txt)
+    sdf["buyer_c"]  = sdf["buyer_assigned"].astype(str).map(_normalize_txt)
 
     # Display labels
     sdf["vendor_disp"] = sdf["vendor"].astype(str).str.title()
-    sdf["buyer_disp"] = sdf["buyer_assigned"].astype(str).str.title()
+    sdf["buyer_disp"]  = sdf["buyer_assigned"].astype(str).str.title()
 
-    # Unified date
-    sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"]).fillna(sdf["created_at"])  # fallback chain
-    sdf["date"] = pd.to_datetime(sdf["date"], errors="coerce")
+    # ---------- PATCH: Date basis (default = Requested Date / Silo) ----------
+    sdf["date_requested"] = sdf["reqs_date"]
+    sdf["date_paid"]      = sdf["most_recent_invoice_paid_date"]
+    sdf["date_received"]  = sdf["received_date"]
+    sdf["date_created"]   = sdf["created_at"]
+    sdf["date"]           = sdf["date_requested"]  # default
+    # ------------------------------------------------------------------------
 
-    # Order identifier: prefer invoice_num; if absent, we'll count rows as proxy later
-    sdf["order_id"] = sdf["invoice_num"].astype(str)
-    sdf.loc[sdf["order_id"].isin(["nan", "none", ""]), "order_id"] = np.nan
+    # ---------- PATCH: order_id prefer sales_order (fallback invoice_num) ----
+    order_id = np.where(sdf["sales_order"].notna(), sdf["sales_order"].astype(str),
+               np.where(sdf["invoice_num"].notna(), sdf["invoice_num"].astype(str), np.nan))
+    order_id = pd.Series(order_id)
+    order_id = order_id.mask(order_id.str.lower().isin(["nan", "none", ""]))
+    sdf["order_id"] = order_id
+    # ------------------------------------------------------------------------
 
     return sdf
 
@@ -175,7 +184,6 @@ def _week_key(ts: pd.Timestamp) -> str:
     iso = ts.isocalendar()
     return f"{int(iso.year)}-W{int(iso.week):02d}"
 
-
 def _winsorized_z(x: pd.Series) -> pd.Series:
     x = pd.to_numeric(x, errors="coerce").fillna(0)
     # soft winsorization at 2–98%
@@ -183,7 +191,6 @@ def _winsorized_z(x: pd.Series) -> pd.Series:
     xw = x.clip(lower=lo, upper=hi)
     mu, sd = xw.mean(), xw.std(ddof=0)
     return (x - mu) / (sd + 1e-9)
-
 
 def make_vendor_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, as_of: pd.Timestamp) -> pd.DataFrame:
     """
@@ -199,11 +206,16 @@ def make_vendor_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
 
     d["week_key"] = d["date"].apply(_week_key)
 
-    # Orders: group by invoice if present, else by row count
+    # Orders: group by order_id if present; else by row count.
     if d["order_id"].notna().any():
         orders = d.groupby(["vendor_c", "order_id"], dropna=False).agg(
             order_revenue=("total_revenue", "sum")
         ).reset_index()
+
+        # ---------- PATCH: excluir pedidos $0 (cancelados/ajustes) ----------
+        orders = orders[orders["order_revenue"].fillna(0) != 0]
+        # --------------------------------------------------------------------
+
         orders_per_vendor = orders.groupby("vendor_c").agg(
             n_orders=("order_id", "nunique"),
             aov=("order_revenue", "mean"),
@@ -248,13 +260,11 @@ def make_vendor_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
         .sort_values(["retention_score", "total_revenue"], ascending=[False, False])
     )
 
-    # expected columns order
-    out = out[[
+    out = out[[  # expected output order
         "vendor", "total_revenue", "n_orders", "aov", "total_qty",
         "last_sale", "recency_days", "active_weeks", "weeks_span", "regularity_ratio", "retention_score"
     ]]
     return out
-
 
 def make_buyer_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, as_of: pd.Timestamp) -> pd.DataFrame:
     """
@@ -321,7 +331,6 @@ def make_buyer_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
     if by_buyer.empty:
         return by_buyer
 
-    # Rank score using percentiles for revenue and active vendors
     by_buyer["rank_score"] = (
         0.5 * by_buyer["avg_retention_score"].fillna(0) +
         0.3 * by_buyer["total_revenue"].rank(pct=True, method="average") +
@@ -330,7 +339,6 @@ def make_buyer_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp
 
     by_buyer = by_buyer.sort_values(["rank_score", "total_revenue"], ascending=[False, False]).reset_index(drop=True)
     return by_buyer
-
 
 def vendors_by_buyer(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, as_of: pd.Timestamp, buyer: str) -> pd.DataFrame:
     if not buyer:
@@ -343,10 +351,18 @@ def vendors_by_buyer(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, a
     return out.sort_values(["retention_score", "total_revenue"], ascending=[False, False]).reset_index(drop=True)
 
 # ------------------------
-# SIDEBAR FILTERS (date range only)
+# SIDEBAR FILTERS (date range + date basis)
 # ------------------------
 with st.sidebar:
     st.subheader("Filters")
+
+    # NEW: Date basis selector
+    basis = st.radio(
+        "Date basis",
+        options=["Requested date (Silo)", "Paid date", "Received date", "Created date"],
+        index=0
+    )
+
     today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
     default_start = (today_bo - pd.Timedelta(days=90)).tz_localize(None)
     default_end = today_bo.tz_localize(None)
@@ -368,6 +384,16 @@ st.caption(f"Recency as-of: **{as_of_date.date()}**")
 # DATA
 # ------------------------
 sdf = load_sales()
+
+# Apply chosen date basis
+if basis == "Paid date":
+    sdf["date"] = sdf["date_paid"]
+elif basis == "Received date":
+    sdf["date"] = sdf["date_received"]
+elif basis == "Created date":
+    sdf["date"] = sdf["date_created"]
+else:
+    sdf["date"] = sdf["date_requested"]
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -573,6 +599,6 @@ st.markdown(f"""
 - `Recency` measured **as of {as_of_date.date()}** (adaptive: today if the range reaches today; otherwise range end - 1 day).
 - Percentages are **display formats**; underlying numeric values are kept for correct sorting.
 - Regularity/Frequency are computed strictly **within the selected range**.
-- Columns for *Buyer* and *Vendor* are normalized (canonical lower-case) for logic and Title Case for display.
-- No explicit filters for Location/Organic in UI; hooks can be added internally later.
+- **Date basis**: por defecto *Requested date (Silo)*. Puedes alternar a *Paid*, *Received* o *Created* desde el panel lateral.
+- **Aggregation**: KPIs usan **sales_order** como identificador de pedido (fallback a invoice) y **excluyen órdenes de $0**.
 """)
