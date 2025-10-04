@@ -157,12 +157,14 @@ def load_sales() -> pd.DataFrame:
 
     sdf = pd.DataFrame(std)
 
+    # Types
     for c in ["reqs_date","most_recent_invoice_paid_date","received_date","use_by_date","pack_date","created_at"]:
         sdf[c] = pd.to_datetime(sdf[c], errors="coerce")
     for c in ["quantity","cost_per_unit","price_per_unit","total_cost",
               "total_sold_lot_expenses","total_revenue","total_profit_usd","total_profit_pct"]:
         sdf[c] = pd.to_numeric(sdf[c], errors="coerce")
 
+    # Normalized fields
     sdf["customer_c"]       = sdf["customer"].astype(str).map(_normalize_txt)
     sdf["sales_rep_c"]      = sdf["sales_rep"].astype(str).map(_normalize_txt)
     sdf["sale_location_c"]  = sdf["sale_location"].astype(str).map(_normalize_txt)
@@ -172,11 +174,20 @@ def load_sales() -> pd.DataFrame:
     sdf["customer_disp"]  = sdf["customer"].astype(str).str.title()
     sdf["sales_rep_disp"] = sdf["sales_rep"].astype(str).str.title()
 
-    sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"])
-    sdf["date"] = pd.to_datetime(sdf["date"], errors="coerce")
+    # ---------- PATCH: date basis + order_id ----------
+    # Keep all three bases; default to Requested Date (Silo)
+    sdf["date_requested"] = pd.to_datetime(sdf["reqs_date"], errors="coerce")
+    sdf["date_paid"]      = pd.to_datetime(sdf["most_recent_invoice_paid_date"], errors="coerce")
+    sdf["date_received"]  = pd.to_datetime(sdf["received_date"], errors="coerce")
+    sdf["date"]           = sdf["date_requested"]  # default; can be overridden by sidebar radio
 
-    sdf["order_id"] = sdf["invoice_num"].astype(str)
-    sdf.loc[sdf["order_id"].isin(["nan","none",""]), "order_id"] = np.nan
+    # order_id = sales_order (fallback to invoice_num), cleaning null-like strings
+    order_id = np.where(sdf["sales_order"].notna(), sdf["sales_order"].astype(str),
+               np.where(sdf["invoice_num"].notna(), sdf["invoice_num"].astype(str), np.nan))
+    order_id = pd.Series(order_id)
+    order_id = order_id.mask(order_id.str.lower().isin(["nan", "none", ""]))
+    sdf["order_id"] = order_id
+    # --------------------------------------------------
 
     return sdf
 
@@ -203,11 +214,16 @@ def make_retention_metrics(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
 
     d["week_key"] = d["date"].apply(_week_key)
 
-    # Orders: group by invoice if present
+    # Orders: group by order_id (sales_order preferred in loader). Fallback: lines.
     if d["order_id"].notna().any():
         orders = d.groupby(["customer_c","order_id"], dropna=False).agg(
             order_revenue=("total_revenue","sum")
         ).reset_index()
+
+        # ---------- PATCH: excluir pedidos $0 (cancelados/ajustes) ----------
+        orders = orders[orders["order_revenue"].fillna(0) != 0]
+        # --------------------------------------------------------------------
+
         orders_per_customer = orders.groupby("customer_c").agg(
             n_orders=("order_id","nunique"),
             aov=("order_revenue","mean")
@@ -320,12 +336,11 @@ def make_salesrep_rankings(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timest
              }))
              .reset_index())
 
-    rep_totals = (rep_cust.groupby("sales_rep_c", dropna=False)
+    rep_totals = (rep_cust.groupby("sales_rep", dropna=False)
                     .agg(total_revenue=("rev","sum"),
                          total_qty=("qty","sum"),
                          active_customers=("customer_c","nunique"))
-                    .reset_index()
-                    .rename(columns={"sales_rep_c": "sales_rep"}))
+                    .reset_index())
 
     cust_all = make_retention_metrics(d, start, end, as_of).rename(columns={"customer":"customer_c"})
     rc2 = rc.merge(cust_all[["customer_c","retention_score"]], on="customer_c", how="left")
@@ -360,10 +375,17 @@ def customers_by_rep(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, a
     return out.sort_values(["retention_score","total_revenue"], ascending=[False, False]).reset_index(drop=True)
 
 # ------------------------
-# SIDEBAR FILTERS (only date range)
+# SIDEBAR FILTERS (date range + date basis)
 # ------------------------
 with st.sidebar:
     st.subheader("Filters")
+    # Date basis selector (PATCH)
+    basis = st.radio(
+        "Date basis",
+        options=["Requested date (Silo)", "Paid date", "Received date"],
+        index=0
+    )
+
     today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
     default_start = (today_bo - pd.Timedelta(days=90)).tz_localize(None)
     default_end = today_bo.tz_localize(None)
@@ -375,16 +397,24 @@ with st.sidebar:
     else:
         start_date, end_date = default_start, default_end + pd.Timedelta(days=1)
 
+# ------------------------
+# DATA
+# ------------------------
+sdf = load_sales()
+
+# Apply chosen date basis (PATCH)
+if basis == "Paid date":
+    sdf["date"] = sdf["date_paid"]
+elif basis == "Received date":
+    sdf["date"] = sdf["date_received"]
+else:
+    sdf["date"] = sdf["date_requested"]
+
 # ✅ Adaptive as_of_date
 today_norm = pd.Timestamp.now(tz="America/Bogota").normalize().tz_localize(None)
 end_minus_1 = (end_date - pd.Timedelta(days=1)).normalize()
 as_of_date = min(today_norm, end_minus_1)
 st.caption(f"Recency as-of: **{as_of_date.date()}**")
-
-# ------------------------
-# DATA
-# ------------------------
-sdf = load_sales()
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -595,4 +625,6 @@ st.markdown(f"""
 - `Recency` measured **as of {as_of_date.date()}** (adaptive: today if the range reaches today; otherwise range end).
 - Percentages are **display formats**; underlying numeric values are kept for correct sorting.
 - Regularity/Frequency are computed strictly **within the selected range**.
+- **Date basis**: por defecto *Requested date (Silo)*. Puedes alternar a *Paid* o *Received* desde el panel lateral.
+- **Aggregation**: KPIs usan **sales_order** como identificador de pedido (fallback a invoice) y **excluyen órdenes de $0**.
 """)
