@@ -364,7 +364,7 @@ with st.sidebar:
     )
 
     today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
-    default_start = (today_bo - pd.Timedelta(days=90)).tz_localize(None)
+    default_start = (today_bo - pd.Timedelta(days=15)).tz_localize(None)
     default_end = today_bo.tz_localize(None)
 
     date_range = st.date_input("Date range", value=(default_start, default_end))
