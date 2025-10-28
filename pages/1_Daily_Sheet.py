@@ -1,5 +1,5 @@
 # app.py
-# FruttoFoods Daily Sheet — con filtro de categoría OG/CV
+# FruttoFoods Daily Sheet — con filtro de categoría OG/CV y renombre Shipper->Vendor
 
 import streamlit as st
 import pandas as pd
@@ -26,7 +26,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Visible version tag to confirm deployment ----
-VERSION = "Daily_Sheet v2025-09-09 — section-based credentials (supabase_quotes) + Volume + OG/CV filter"
+VERSION = "Daily_Sheet v2025-09-09 — OG/CV filter + Vendor rename"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -63,7 +63,7 @@ def _ogcv(x) -> str:
         return "OG" if xi == 1 else "CV" if xi == 0 else ""
     except Exception:
         s = str(x).strip().lower()
-        # Keep generous mapping to handle mixed inputs
+        # Generous mapping
         return "OG" if s in ("organic","org","1","true","sí","si","yes","y") else \
                "CV" if s in ("conventional","conv","0","false","no","n") else ""
 
@@ -239,7 +239,7 @@ if day_df.empty:
     st.stop()
 
 # Derived fields
-day_df["Shipper"] = day_df["VendorClean"]
+day_df["Vendor"]  = day_df["VendorClean"]
 day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
 day_df["Where"]   = day_df["Location"]
 day_df["Size"]    = day_df.apply(_choose_size, axis=1)
@@ -249,7 +249,7 @@ day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
 # ---------- Day view filters ----------
-# Ahora: 5 columnas (se agrega Category (OG/CV))
+# 5 columnas (se agregó Category (OG/CV) y rename a Vendor)
 cols = st.columns(5)
 
 with cols[0]:
@@ -260,7 +260,7 @@ with cols[1]:
     locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_locs = st.multiselect("Locations", options=locs, default=locs)
 
-# 🆕 NUEVO: filtro por categoría OG/CV
+# 🆕 Filtro por categoría OG/CV
 with cols[2]:
     cat_options = ["Conventional (CV)", "Organic (OG)"]
     sel_cat = st.multiselect(
@@ -274,7 +274,7 @@ with cols[3]:
     search = st.text_input("Search product (contains)", "")
 
 with cols[4]:
-    sort_opt = st.selectbox("Sort by", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
+    sort_opt = st.selectbox("Sort by", ["Product", "Vendor", "Where", "Price (asc)", "Price (desc)"])
 
 # ---- Apply filters ----
 if sel_products:
@@ -283,15 +283,14 @@ if sel_products:
 if sel_locs:
     day_df = day_df[day_df["Where"].isin(sel_locs)]
 
-# 🆕 APLICACIÓN del filtro de categoría OG/CV
+# 🆕 Aplicación del filtro de categoría OG/CV
 if sel_cat:
     allowed = set()
     if "Conventional (CV)" in sel_cat:
         allowed.add("CV")
     if "Organic (OG)" in sel_cat:
         allowed.add("OG")
-    # Evitar dejar tabla vacía si el usuario quita todas
-    if allowed:
+    if allowed:  # evitar tabla vacía accidental
         day_df = day_df[day_df["OG/CV"].isin(allowed)]
 
 if search.strip():
@@ -311,7 +310,7 @@ st.divider()
 edit_mode = st.toggle(
     "✏️ Edit mode (everything except date)",
     value=False,
-    help="Edit Shipper, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. Date is locked."
+    help="Edit Vendor, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. Date is locked."
 )
 
 if edit_mode:
@@ -321,9 +320,9 @@ if edit_mode:
     ]].copy()
 
     edit_df = edit_df.rename(columns={
-        "VendorClean": "Shipper",
+        "VendorClean": "Vendor",
         "Location": "Where",
-        "size_text": "Size",     # UI shows "Size" but persists to size_text
+        "size_text": "Size",     # UI muestra "Size" pero persiste en size_text
         "Organic": "organic",
         "Price": "price",
     })
@@ -331,7 +330,7 @@ if edit_mode:
     col_config = {
         "id": st.column_config.TextColumn("ID", disabled=True),
         "cotization_date": st.column_config.DatetimeColumn("Date", format="MM/DD/YYYY", disabled=True),
-        "Shipper": st.column_config.TextColumn("Shipper"),
+        "Vendor": st.column_config.TextColumn("Vendor"),
         "Where": st.column_config.TextColumn("Where"),
         "Product": st.column_config.TextColumn("Product"),
         "Size": st.column_config.TextColumn("Size (size_text)"),
@@ -348,12 +347,12 @@ if edit_mode:
         num_rows="fixed",
         use_container_width=True,
         column_config=col_config,
-        column_order=["id","cotization_date","Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]
+        column_order=["id","cotization_date","Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]
     )
 
     if st.button("💾 Save changes", type="primary", use_container_width=True):
-        ORIG = edit_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
-        NEW  = edited_df.set_index("id")[["Shipper","Where","Product","Size","organic","price","volume_num","volume_unit"]]
+        ORIG = edit_df.set_index("id")[["Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]]
+        NEW  = edited_df.set_index("id")[["Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]]
 
         changed_mask = (ORIG != NEW) & ~(ORIG.isna() & NEW.isna())
         dirty_ids = NEW.index[changed_mask.any(axis=1)].tolist()
@@ -380,7 +379,7 @@ if edit_mode:
 
                 # UI -> DB
                 db_row = {
-                    "vendorclean": ui_row.get("Shipper"),
+                    "vendorclean": ui_row.get("Vendor"),
                     "location": ui_row.get("Where"),
                     "product": ui_row.get("Product"),
                     "size_text": ui_row.get("Size"),
@@ -409,7 +408,7 @@ if edit_mode:
                 # Refresh local day_df
                 upd = NEW.loc[dirty_ids].reset_index()
                 upd = upd.rename(columns={
-                    "Shipper":"VendorClean",
+                    "Vendor":"VendorClean",
                     "Where":"Location",
                     "price":"Price",
                     "Size":"size_text",
@@ -420,18 +419,18 @@ if edit_mode:
                         if col in r and pd.notna(r[col]):
                             day_df.loc[mask, col] = r[col]
 
-                # Derivatives:
-                day_df["Shipper"] = day_df["VendorClean"]
-                day_df["Where"]   = day_df["Location"]
-                day_df["Price$"]  = day_df["Price"].apply(_format_price)
-                day_df["Size"]    = day_df.apply(_choose_size, axis=1)
-                day_df["Volume"]  = day_df.apply(_volume_str, axis=1)
+                # Derivatives (recalcular columnas derivadas)
+                day_df["Vendor"] = day_df["VendorClean"]
+                day_df["Where"]  = day_df["Location"]
+                day_df["Price$"] = day_df["Price"].apply(_format_price)
+                day_df["Size"]   = day_df.apply(_choose_size, axis=1)
+                day_df["Volume"] = day_df.apply(_volume_str, axis=1)
 
             except Exception as e:
                 st.error(f"Error saving changes: {e}")
 
 # ---------- Read-only pretty table ----------
-show = day_df[["Date","Shipper","Where","OG/CV","Product","Size","Volume","Price$", "Family"]].reset_index(drop=True)
+show = day_df[["Date","Vendor","Where","OG/CV","Product","Size","Volume","Price$", "Family"]].reset_index(drop=True)
 st.dataframe(show, use_container_width=True)
 
 # CSV download with formatted date
@@ -459,7 +458,7 @@ else:
         viz_day["price_num"] = pd.to_numeric(viz_day["Price"], errors="coerce")
         viz_day["volume_num"] = pd.to_numeric(viz_day["volume_num"], errors="coerce")
         viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
-        viz_day["Shipper_norm"] = viz_day["Shipper"].apply(_norm_name)
+        viz_day["Vendor_norm"] = viz_day["Vendor"].apply(_norm_name)
 
         # ---- Quick KPIs (from visible rows) ----
         c_k1, c_k2, c_k3, c_k4 = st.columns(4)
@@ -487,28 +486,28 @@ else:
             ).properties(title="Average price by location (visible table)", height=320)
             st.altair_chart(chart_loc, use_container_width=True)
 
-        # ---- 2) Average price by shipper (bars) ----
-        g_ship = (viz_day.groupby("Shipper_norm", as_index=False)
+        # ---- 2) Average price by vendor (bars) ----
+        g_vendor = (viz_day.groupby("Vendor_norm", as_index=False)
                          .agg(avg_price=("price_num","mean"),
-                              offers=("Shipper_norm","count")))
-        if not g_ship.empty:
-            chart_ship = alt.Chart(g_ship).mark_bar().encode(
+                              offers=("Vendor_norm","count")))
+        if not g_vendor.empty:
+            chart_vendor = alt.Chart(g_vendor).mark_bar().encode(
                 x=alt.X("avg_price:Q", title="Average price"),
-                y=alt.Y("Shipper_norm:N", sort="-x", title="Shipper"),
-                tooltip=["Shipper_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Average price by shipper (visible table)", height=350)
-            st.altair_chart(chart_ship, use_container_width=True)
+                y=alt.Y("Vendor_norm:N", sort="-x", title="Vendor"),
+                tooltip=["Vendor_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Average price by vendor (visible table)", height=350)
+            st.altair_chart(chart_vendor, use_container_width=True)
 
-        # ---- 3) Volume by shipper (bars) ----
-        g_vol = (viz_day.groupby("Shipper_norm", as_index=False)
+        # ---- 3) Volume by vendor (bars) ----
+        g_vol = (viz_day.groupby("Vendor_norm", as_index=False)
                         .agg(total_volume=("volume_num","sum")))
         g_vol = g_vol[g_vol["total_volume"].fillna(0) > 0]
         if not g_vol.empty:
             chart_vol = alt.Chart(g_vol).mark_bar().encode(
                 x=alt.X("total_volume:Q", title="Total volume"),
-                y=alt.Y("Shipper_norm:N", sort="-x", title="Shipper"),
-                tooltip=["Shipper_norm:N", alt.Tooltip("total_volume:Q", format=",.0f")]
-            ).properties(title="Volume by shipper (visible table)", height=350)
+                y=alt.Y("Vendor_norm:N", sort="-x", title="Vendor"),
+                tooltip=["Vendor_norm:N", alt.Tooltip("total_volume:Q", format=",.0f")]
+            ).properties(title="Volume by vendor (visible table)", height=350)
             st.altair_chart(chart_vol, use_container_width=True)
 
         # ---- 4) Average price by product (bars) ----
@@ -528,7 +527,7 @@ else:
             scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
                 x=alt.X("price_num:Q", title="Price"),
                 y=alt.Y("volume_num:Q", title="Volume"),
-                tooltip=["Product","Shipper_norm","Where_norm",
+                tooltip=["Product","Vendor_norm","Where_norm",
                          alt.Tooltip("price_num:Q", format=".2f"),
                          alt.Tooltip("volume_num:Q", format=",.0f")]
             ).properties(title="Price vs Volume (visible table)", height=320)
@@ -536,7 +535,7 @@ else:
 
         # ---- 6) Extremes table ----
         with st.expander("🔎 View price extremes (visible table)"):
-            tmp = viz_day[["Product","Shipper","Where","price_num","Volume"]].dropna(subset=["price_num"]).copy()
+            tmp = viz_day[["Product","Vendor","Where","price_num","Volume"]].dropna(subset=["price_num"]).copy()
             tmp = tmp.sort_values("price_num")
             c1, c2 = st.columns(2)
             with c1:
