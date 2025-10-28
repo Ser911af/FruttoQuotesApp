@@ -1,3 +1,6 @@
+# app.py
+# FruttoFoods Daily Sheet — con filtro de categoría OG/CV
+
 import streamlit as st
 import pandas as pd
 import os
@@ -23,7 +26,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Visible version tag to confirm deployment ----
-VERSION = "Daily_Sheet v2025-09-09 — section-based credentials (supabase_quotes) + Volume"
+VERSION = "Daily_Sheet v2025-09-09 — section-based credentials (supabase_quotes) + Volume + OG/CV filter"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -246,23 +249,51 @@ day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
 # ---------- Day view filters ----------
-cols = st.columns(4)
+# Ahora: 5 columnas (se agrega Category (OG/CV))
+cols = st.columns(5)
+
 with cols[0]:
     product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_products = st.multiselect("Products (available)", options=product_options, default=product_options)
+
 with cols[1]:
     locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_locs = st.multiselect("Locations", options=locs, default=locs)
+
+# 🆕 NUEVO: filtro por categoría OG/CV
 with cols[2]:
-    search = st.text_input("Search product (contains)", "")
+    cat_options = ["Conventional (CV)", "Organic (OG)"]
+    sel_cat = st.multiselect(
+        "Category (OG/CV)",
+        options=cat_options,
+        default=cat_options,
+        help="Filtra por productos Convencionales u Orgánicos."
+    )
+
 with cols[3]:
+    search = st.text_input("Search product (contains)", "")
+
+with cols[4]:
     sort_opt = st.selectbox("Sort by", ["Product", "Shipper", "Where", "Price (asc)", "Price (desc)"])
 
 # ---- Apply filters ----
 if sel_products:
     day_df = day_df[day_df["Product"].isin(sel_products)]
+
 if sel_locs:
     day_df = day_df[day_df["Where"].isin(sel_locs)]
+
+# 🆕 APLICACIÓN del filtro de categoría OG/CV
+if sel_cat:
+    allowed = set()
+    if "Conventional (CV)" in sel_cat:
+        allowed.add("CV")
+    if "Organic (OG)" in sel_cat:
+        allowed.add("OG")
+    # Evitar dejar tabla vacía si el usuario quita todas
+    if allowed:
+        day_df = day_df[day_df["OG/CV"].isin(allowed)]
+
 if search.strip():
     s = search.strip().lower()
     day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
