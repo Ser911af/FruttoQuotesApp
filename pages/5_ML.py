@@ -1,5 +1,5 @@
 # app.py
-# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom column order
+# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom order + CONCAT column
 
 import streamlit as st
 import pandas as pd
@@ -26,7 +26,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Visible version tag to confirm deployment ----
-VERSION = "Daily_Sheet v2025-11-07 — hide Date/Family + Family filter + Product emojis + custom order"
+VERSION = "Daily_Sheet v2025-11-07 — hide Date/Family + Family filter + Product emojis + custom order + Concat"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -63,7 +63,6 @@ def _ogcv(x) -> str:
         return "OG" if xi == 1 else "CV" if xi == 0 else ""
     except Exception:
         s = str(x).strip().lower()
-        # Generous mapping
         return "OG" if s in ("organic","org","1","true","sí","si","yes","y") else \
                "CV" if s in ("conventional","conv","0","false","no","n") else ""
 
@@ -85,13 +84,13 @@ def _format_price(x) -> str:
 
 def _family_from_product(p: str) -> str:
     s = (p or "").lower()
-    if any(k in s for k in ["tomato", "roma", "round", "grape"]):
+    if any(k in s for k in ["tomato", "roma", "round", "grape", "heirloom", "tov"]):
         return "Tomato"
-    if any(k in s for k in ["squash", "zucchini", "gray"]):
+    if any(k in s for k in ["squash", "zucchini", "gray", "grey"]):
         return "Soft Squash"
     if "cucumber" in s or "cuke" in s:
         return "Cucumbers"
-    if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano"]):
+    if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano", "pasilla", "anaheim", "shishito", "palermo"]):
         return "Bell Peppers"
     return "Others"
 
@@ -114,7 +113,7 @@ commodities_emojis = {
     "Delicata": "🎃", "Eggplant": "🍆", "Freight": "🚚", "Garlic": "🧄", "Ginger": "🫚",
     "Grape Tomato": "🍅", "Grapes Early Sweet": "🍇", "Green Beans": "🫛",
     "Green Bell Pepper": "🫑", "Green Onions": "🧅", "Green Plantain": "🍌", "Grey Squash": "🎃",
-    "Habanero": "🌶️🔥", "Heirloom Tomato": "🍅", "Honeydew": "🍈", "Jalapeã±O": "🌶️",
+    "Habanero": "🌶️🔥", "Heirloom": "🍅", "Heirloom Tomato": "🍅", "Honeydew": "🍈", "Jalapeã±O": "🌶️",
     "Kabocha": "🎃", "Lemon": "🍋", "Lettuce": "🥬", "Logistic": "📦", "Mango": "🥭",
     "Material": "📦", "Medley": "🥗", "Minisweet Pepper": "🫑", "Orange Bell Pepper": "🟧🫑",
     "Other": "📦", "Palermo Pepper": "🌶️", "Papaya": "🍈", "Pasilla": "🌶️",
@@ -122,29 +121,84 @@ commodities_emojis = {
     "Poblano": "🌶️", "Raspberries": "🍓", "Red Bell Pepper": "🟥🫑", "Red Cabbage": "🥬",
     "Red Onion": "🧅", "Roma Tomato": "🍅", "Romaine": "🥬", "Round Tomato": "🍅",
     "Serrano": "🌶️", "Shishito": "🌶️", "Spaghetti": "🍝", "Strawberry": "🍓",
-    "Tariff": "💲", "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "Tov Tomato": "🍅",
+    "Tariff": "💲", "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "TOV (Tomato on Vine)": "🍅",
     "Watermelon": "🍉", "White Corn": "🌽", "White Onion": "🧅", "Yellow Bell Pepper": "🟨🫑",
-    "Yellow Corn": "🌽", "Yellow Onion": "🧅", "Yellow Squash": "🎃", "Zucchini": "🥒"
+    "Yellow Corn": "🌽", "Yellow Onion": "🧅", "Yellow Squash": "🎃", "Zucchini": "🥒",
+    "English Cucumber": "🥒"
 }
 
 def add_emoji_to_product(p: str) -> str:
-    """Adjunta un emoji al producto si hay match exacto o parcial (no afecta filtros ni gráficos)."""
+    """Para la tabla: antepone el emoji al Product si hay match (substring insensible)."""
     if not isinstance(p, str) or not p.strip():
         return ""
     for key, emoji in commodities_emojis.items():
         if key.lower() in p.lower():
             return f"{emoji} {p}"
+    # Fallbacks comunes
+    pl = p.lower()
+    if "heirloom" in pl or "tomato" in pl: return f"🍅 {p}"
+    if "english" in pl and "cucumber" in pl: return f"🥒 {p}"
+    if "cucumber" in pl: return f"🥒 {p}"
+    if "red bell pepper" in pl: return f"🟥🫑 {p}"
+    if "yellow bell pepper" in pl: return f"🟨🫑 {p}"
+    if "orange bell pepper" in pl: return f"🟧🫑 {p}"
+    if "bell pepper" in pl: return f"🫑 {p}"
     return p
+
+def product_emoji(p: str) -> str:
+    """Para la concatenación: devuelve SOLO el emoji (sin modificar el Product)."""
+    if not isinstance(p, str) or not p.strip():
+        return ""
+    for key, emoji in commodities_emojis.items():
+        if key.lower() in p.lower():
+            return emoji
+    pl = p.lower()
+    if "heirloom" in pl or "tomato" in pl: return "🍅"
+    if "english" in pl and "cucumber" in pl: return "🥒"
+    if "cucumber" in pl: return "🥒"
+    if "red bell pepper" in pl: return "🟥🫑"
+    if "yellow bell pepper" in pl: return "🟨🫑"
+    if "orange bell pepper" in pl: return "🟧🫑"
+    if "bell pepper" in pl: return "🫑"
+    return ""
+
+def _clean_concat_volume(v: str) -> str:
+    """Vacía si es 'nan', 'none', 'nan none' o blanco."""
+    s = (str(v) if v is not None else "").strip()
+    sl = s.lower()
+    if not s or sl in ("nan", "none", "nan none"):
+        return ""
+    return s
+
+def build_concat_row(row) -> str:
+    """
+    {OG/CV} - {Product} {Size} {Volume} {Price$} {emoji}
+    - Vendor ignorado
+    - Volume opcional (limpio)
+    - emoji al final
+    """
+    ogcv = (row.get("OG/CV") or "").strip()
+    product = (row.get("Product") or "").strip()
+    size = (row.get("Size") or "").strip()
+    vol = _clean_concat_volume(row.get("Volume"))
+    price = (row.get("Price$") or "").strip()
+    emoji = product_emoji(product)
+
+    pieces = [ogcv, "-", product]
+    if size:
+        pieces.append(size)
+    if vol:
+        pieces.append(vol)
+    if price:
+        pieces.append(price)
+    if emoji:
+        pieces.append(emoji)
+    return " ".join([p for p in pieces if str(p).strip() != ""])
 
 # ------------------------
 # Supabase helpers (by sections)
 # ------------------------
 def _read_section(section_name: str) -> dict:
-    """
-    Reads a section from st.secrets (e.g., 'supabase_quotes') and validates minimal keys.
-    Expects:
-      url, anon_key, table (default: quotations), schema (default: public)
-    """
     try:
         sec = st.secrets[section_name]
     except Exception:
@@ -165,7 +219,6 @@ def _create_client(url: str, key: str):
     return create_client(url, key)
 
 def _sb_table(sb, schema: str, table: str):
-    """Returns a table handle respecting schema if the client supports it."""
     try:
         return sb.schema(schema).table(table)  # supabase-py v2+
     except Exception:
@@ -176,7 +229,6 @@ def _sb_table(sb, schema: str, table: str):
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_quotations_from_supabase():
-    """Fetch quotations in pages using the [supabase_quotes] section."""
     try:
         cfg = _read_section("supabase_quotes")
         sb = _create_client(cfg["url"], cfg["anon_key"])
@@ -213,7 +265,6 @@ def fetch_all_quotations_from_supabase():
     if df.empty:
         return df
 
-    # Minimal normalization
     df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
     df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
     df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
@@ -284,7 +335,6 @@ day_df["Family"]  = day_df["Product"].apply(_family_from_product)
 day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
 
 # ---------- Day view filters ----------
-# ↑ Pasamos de 5 a 6 columnas para incluir filtro por Family
 cols = st.columns(6)
 
 with cols[0]:
@@ -295,7 +345,6 @@ with cols[1]:
     locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_locs = st.multiselect("Locations", options=locs, default=locs)
 
-# 🆕 Filtro por categoría OG/CV
 with cols[2]:
     cat_options = ["Conventional (CV)", "Organic (OG)"]
     sel_cat = st.multiselect(
@@ -305,7 +354,6 @@ with cols[2]:
         help="Filtra por productos Convencionales u Orgánicos."
     )
 
-# 🆕 Filtro por Family (no se muestra en la tabla, solo para filtrar)
 with cols[3]:
     fam_options = sorted([x for x in day_df["Family"].dropna().unique().tolist() if str(x).strip() != ""])
     sel_fams = st.multiselect("Family (filter only)", options=fam_options, default=fam_options)
@@ -319,21 +367,16 @@ with cols[5]:
 # ---- Apply filters ----
 if sel_products:
     day_df = day_df[day_df["Product"].isin(sel_products)]
-
 if sel_locs:
     day_df = day_df[day_df["Where"].isin(sel_locs)]
 
-# 🆕 Aplicación del filtro de categoría OG/CV
 if sel_cat:
     allowed = set()
-    if "Conventional (CV)" in sel_cat:
-        allowed.add("CV")
-    if "Organic (OG)" in sel_cat:
-        allowed.add("OG")
-    if allowed:  # evitar tabla vacía accidental
+    if "Conventional (CV)" in sel_cat: allowed.add("CV")
+    if "Organic (OG)" in sel_cat: allowed.add("OG")
+    if allowed:
         day_df = day_df[day_df["OG/CV"].isin(allowed)]
 
-# 🆕 Aplicación del filtro Family
 if sel_fams:
     day_df = day_df[day_df["Family"].isin(sel_fams)]
 
@@ -366,7 +409,7 @@ if edit_mode:
     edit_df = edit_df.rename(columns={
         "VendorClean": "Vendor",
         "Location": "Where",
-        "size_text": "Size",     # UI muestra "Size" pero persiste en size_text
+        "size_text": "Size",
         "Organic": "organic",
         "Price": "price",
     })
@@ -474,18 +517,21 @@ if edit_mode:
                 st.error(f"Error saving changes: {e}")
 
 # ---------- Read-only pretty table ----------
-# Ocultamos Date y Family de la vista, pero Family se usa para filtrar arriba
-# Emojis SOLO para la tabla/CSV (no alteran day_df usado en filtros y gráficos)
+# 1) Copia para mostrar emojis en Product
 display_df = day_df.copy()
 display_df["Product"] = display_df["Product"].apply(add_emoji_to_product)
 
-# Orden de columnas personalizado
+# 2) Columna de concatenación (emoji al final, usando los valores SIN modificar)
+concat_series = day_df.apply(build_concat_row, axis=1)
+
+# Orden de columnas personalizado + Concat al final
 ordered_cols = ["Product", "Price$", "Size", "Where", "Volume", "OG/CV", "Vendor"]
-show = display_df[ordered_cols].reset_index(drop=True)
+show = display_df[ordered_cols].copy()
+show["Concat"] = concat_series.values  # última columna
 
 st.dataframe(show, use_container_width=True)
 
-# CSV export con el mismo orden y con emojis
+# CSV export con el mismo orden + Concat
 csv_bytes = show.to_csv(index=False).encode("utf-8")
 st.download_button(
     "⬇️ Download CSV (day view)",
@@ -512,7 +558,6 @@ else:
         viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
         viz_day["Vendor_norm"] = viz_day["Vendor"].apply(_norm_name)
 
-        # ---- Quick KPIs (from visible rows) ----
         c_k1, c_k2, c_k3, c_k4 = st.columns(4)
         with c_k1:
             mean_price = viz_day["price_num"].mean()
@@ -526,7 +571,6 @@ else:
         with c_k4:
             st.metric("Visible offers", f"{len(viz_day)}")
 
-        # ---- 1) Average price by location (bars) ----
         g_loc = (viz_day.groupby("Where_norm", as_index=False)
                         .agg(avg_price=("price_num","mean"),
                              offers=("Where_norm","count")))
@@ -538,7 +582,6 @@ else:
             ).properties(title="Average price by location (visible table)", height=320)
             st.altair_chart(chart_loc, use_container_width=True)
 
-        # ---- 2) Average price by vendor (bars) ----
         g_vendor = (viz_day.groupby("Vendor_norm", as_index=False)
                          .agg(avg_price=("price_num","mean"),
                               offers=("Vendor_norm","count")))
@@ -550,7 +593,6 @@ else:
             ).properties(title="Average price by vendor (visible table)", height=350)
             st.altair_chart(chart_vendor, use_container_width=True)
 
-        # ---- 3) Volume by vendor (bars) ----
         g_vol = (viz_day.groupby("Vendor_norm", as_index=False)
                         .agg(total_volume=("volume_num","sum")))
         g_vol = g_vol[g_vol["total_volume"].fillna(0) > 0]
@@ -562,7 +604,6 @@ else:
             ).properties(title="Volume by vendor (visible table)", height=350)
             st.altair_chart(chart_vol, use_container_width=True)
 
-        # ---- 4) Average price by product (bars) ----
         g_prod = (viz_day.groupby("Product", as_index=False)
                           .agg(avg_price=("price_num","mean"),
                                offers=("Product","count")))
@@ -574,7 +615,6 @@ else:
             ).properties(title="Average price by product (visible table)", height=350)
             st.altair_chart(chart_prod, use_container_width=True)
 
-        # ---- 5) Scatter Price vs Volume (outliers) ----
         if viz_day["volume_num"].fillna(0).sum() > 0:
             scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
                 x=alt.X("price_num:Q", title="Price"),
