@@ -1,308 +1,586 @@
-# -*- coding: utf-8 -*-
-# Streamlit page: Upload Quotes — Paste Mode
-# Autor: Sergio + ChatGPT (FruttoFoods)
-# Descripción: Pega cotizaciones (desde Excel/Email/Sheets), normaliza y sube a Supabase.
+# app.py
+# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom column order
 
-import os
-import io
-import re
-import datetime as dt
-from typing import Dict, List, Tuple
-
-import pandas as pd
-import numpy as np
 import streamlit as st
+import pandas as pd
+import os
+import re
 
-try:
-    from supabase import create_client
-except Exception:
-    create_client = None  # Supabase opcional en local/dev
-
-# ✅ Login simple
+# ✅ 1) Mandatory login before loading anything heavy
 from simple_auth import ensure_login, logout_button
 
-st.set_page_config(page_title="Upload Quotes — Paste Mode", page_icon="📋", layout="wide")
-
-# Guard de sesión
-user = ensure_login()
+user = ensure_login()   # If there’s no session, this call should block the page (st.stop)
 with st.sidebar:
     logout_button()
 
-st.title("📋 Ingesta de Cotizaciones (pegar desde portapapeles)")
-st.caption(f"Sesión: {user} — Pega tus cotizaciones tal cual salen de Excel/Email/Sheets. Valido, normalizo y subo a la base.")
+# (Optional) show current user in the UI
+st.caption(f"Session: {user}")
+
+# ---- Optional Altair (with detection) ----
+try:
+    import altair as alt
+    ALTAIR_OK = True
+except Exception:
+    ALTAIR_OK = False
+
+st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
+
+# ---- Visible version tag to confirm deployment ----
+VERSION = "Daily_Sheet v2025-11-07 — hide Date/Family + Family filter + Product emojis + custom order"
+st.caption(VERSION)
+
+LOGO_PATH = "data/Asset 7@4x.png"
 
 # ------------------------
-# Helpers de credenciales Supabase
+# Helpers (parsing & formatting)
 # ------------------------
-def _get_supabase_block(block: str = "supabase_quotes"):
-    blk = st.secrets.get(block, {})
-    url = blk.get("url")
-    key = blk.get("anon_key")
-    table = blk.get("table", "quotations")
-    schema = blk.get("schema", "public")
-    return url, key, schema, table
+_size_regex = re.compile(
+    r"(\d+\s?lb|\d+\s?ct|\d+\s?[xX]\s?\d+|bulk|jbo|xl|lg|med|fancy|4x4|4x5|5x5|60cs)",
+    flags=re.IGNORECASE
+)
 
-# ------------------------
-# Constantes y helpers
-# ------------------------
-EXCEL_EPOCH = dt.date(1899, 12, 30)  # Excel date origin
-STANDARD_COLS = [
-    "Date", "Supplier", "OG/CV", "Product", "Size", "Volume", "Price", "Where", "Concat", "Date2"
-]
+def _size_from_product(p: str) -> str:
+    if not isinstance(p, str):
+        return ""
+    m = _size_regex.search(p)
+    return m.group(1) if m else ""
 
-def _cot_date_to_mdy_text(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)) or (isinstance(val, str) and val.strip() == ""):
-        return None
+def _choose_size(row) -> str:
+    # 1) Prioritize size_text (original grade/size)
+    stxt = row.get("size_text")
+    if isinstance(stxt, str) and stxt.strip():
+        return stxt.strip()
+    # 2) Legacy fallback: volume_standard
+    vs = row.get("volume_standard")
+    if isinstance(vs, str) and vs.strip():
+        return vs.strip()
+    # 3) Last resort: infer from Product
+    return _size_from_product(row.get("Product", ""))
+
+def _ogcv(x) -> str:
     try:
-        ts = pd.to_datetime(val, errors="raise")
-        if not pd.isna(ts):
-            ts = ts.to_pydatetime()
-            return f"{ts.month}/{ts.day}/{ts.year}"
+        xi = int(x)
+        return "OG" if xi == 1 else "CV" if xi == 0 else ""
     except Exception:
-        pass
-    if isinstance(val, str) and re.fullmatch(r"\d{6}", val):
-        mm, dd, yy = int(val[0:2]), int(val[2:4]), int(val[4:6])
-        yyyy = 2000 + yy
-        try:
-            d = dt.date(yyyy, mm, dd)
-            return f"{d.month}/{d.day}/{d.year}"
-        except Exception:
-            return None
-    if isinstance(val, (int, float)) and not pd.isna(val):
-        try:
-            base = EXCEL_EPOCH + dt.timedelta(days=int(val))
-            return f"{base.month}/{base.day}/{base.year}"
-        except Exception:
-            pass
-    if isinstance(val, str):
-        try:
-            ts = pd.to_datetime(val, errors="raise", dayfirst=False, infer_datetime_format=True)
-            ts = ts.to_pydatetime()
-            return f"{ts.month}/{ts.day}/{ts.year}"
-        except Exception:
-            pass
-    return None
+        s = str(x).strip().lower()
+        # Generous mapping
+        return "OG" if s in ("organic","org","1","true","sí","si","yes","y") else \
+               "CV" if s in ("conventional","conv","0","false","no","n") else ""
 
-@st.cache_data(show_spinner=False)
-def _detect_separator(sample: str) -> str:
-    if "\t" in sample:
-        return "\t"
-    comma = sample.count(","); semicolon = sample.count(";"); pipe = sample.count("|")
-    if comma > semicolon and comma > pipe:
-        return ","
-    if semicolon >= comma and semicolon > pipe:
-        return ";"
-    if pipe > 0:
-        return "|"
-    return r"\s{2,}"
-
-@st.cache_data(show_spinner=False)
-def _read_pasted(text: str) -> pd.DataFrame:
-    text = text.strip().replace("\r\n", "\n")
-    if not text:
-        return pd.DataFrame()
-    sep = _detect_separator(text)
-    buf = io.StringIO(text)
-    if sep == r"\s{2,}":
-        rows = [re.split(r"\s{2,}", ln.strip()) for ln in text.splitlines() if ln.strip()]
-        width = max(len(r) for r in rows)
-        rows = [r + [None] * (width - len(r)) for r in rows]
-        df = pd.DataFrame(rows[1:], columns=rows[0])
-    else:
-        df = pd.read_csv(buf, sep=sep)
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-@st.cache_data(show_spinner=False)
-def _suggest_mappings(cols: List[str]) -> Dict[str, str]:
-    mapping = {}
-    lowered = {c.lower(): c for c in cols}
-    def find(*cands):
-        for cand in cands:
-            for k, orig in lowered.items():
-                if cand in k:
-                    return orig
-        return None
-    mapping["Date"]     = find("date", "fecha")
-    mapping["Supplier"] = find("supplier", "seller", "vendor", "provee")
-    mapping["OG/CV"]    = find("og/cv", "og", "cv")
-    mapping["Product"]  = find("product", "item")
-    mapping["Size"]     = find("size", "pack")
-    mapping["Volume"]   = find("volume", "qty", "quantity", "volumen")
-    mapping["Price"]    = find("price", "usd", "$", "precio")
-    mapping["Where"]    = find("where", "city", "location", "loc", "nogales", "mcallen", "pharr")
-    mapping["Concat"]   = lowered.get("concat")
-    mapping["Date2"]    = lowered.get("date2")
-    return mapping
-
-@st.cache_data(show_spinner=False)
-def _normalize(df: pd.DataFrame, colmap: Dict[str, str]) -> pd.DataFrame:
-    out = pd.DataFrame()
-    for std_col, src in colmap.items():
-        if src and src in df.columns:
-            out[std_col] = df[src]
-        else:
-            out[std_col] = None
-    if out["Date"].notna().any():
-        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
-    else:
-        out["Date"] = pd.NaT
-    out["OG/CV"] = out["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
-    for col in ["Product", "Size", "Where", "Supplier", "Volume"]:
-        out[col] = out[col].astype(str).str.strip().replace({"None": None, "nan": None, "": None})
-    out["Price"] = (
-        out["Price"].astype(str)
-        .str.replace("$", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.replace(r"(\d)\.(\.)+(\d)", r"\1.\3", regex=True)
-        .str.replace(",", ".", regex=False)
-        .str.extract(r"([0-9]+(?:\.[0-9]+)?)", expand=False)
-        .astype(float)
-    )
-    needs_concat = out.get("Concat").isna().all()
-    if needs_concat:
-        excel_serial = out["Date"].dt.date.apply(lambda d: (d - EXCEL_EPOCH).days if pd.notna(d) else None)
-        out["Concat"] = excel_serial.astype("Int64").astype(str) + out["Product"].fillna("") + out["Size"].fillna("")
-    if out.get("Date2").isna().all():
-        out["Date2"] = 1
-    out = out[STANDARD_COLS]
-    return out
-
-def _validate(df: pd.DataFrame) -> List[str]:
-    issues = []
-    required = ["Date", "Supplier", "OG/CV", "Product", "Price", "Where"]
-    for col in required:
-        if df[col].isna().all():
-            issues.append(f"Columna requerida vacía: {col}")
-    if df["Date"].isna().any():
-        issues.append("Hay filas con fecha inválida.")
-    if (df["OG/CV"].isna()).any():
-        issues.append("Valores OG/CV no detectados.")
-    if (df["Price"].isna()).any():
-        issues.append("Precios inválidos.")
-    return issues
-
-# ------------------------
-# Volume parsing
-# ------------------------
-_VOL_PATTERNS: List[Tuple[str, str]] = [
-    (r"\b(\d+)\s*(?:p|plt|plts|pallets?|tarimas?)\b", "PALLETS"),
-    (r"\b(\d+)\s*(?:loads?|ld|tl|trucks?|trk)\b", "LOADS"),
-    (r"\b(\d+)\s*(?:cs|ctn|cases?|cajas?|caj)\b", "CS"),
-]
-_NEAR_SIZE = re.compile(r"[/x#–-]|\b\d+\s*(?:ct|lb|lbs?|kg|g)\b|\b\d+\s*[-–]\s*\d+\b", re.IGNORECASE)
-
-def _parse_volume_from_texts(product, size, volume):
-    parts = [p for p in [str(volume) if volume else None, str(product) if product else None, str(size) if size else None] if p and p != "None"]
-    if not parts:
-        return None, None, None
-    s_nosp = " " + " ".join(parts).lower().strip() + " "
-    if re.search(r"\b\d+\s*[-–]\s*\d+\s*(?:p|plt|plts|pallets?|cs|ctn|cases?)\b", s_nosp):
-        return None, None, None
-    for pat, unit_norm in _VOL_PATTERNS:
-        for m in re.finditer(pat, s_nosp, re.IGNORECASE):
-            start = max(0, m.start() - 8)
-            context = s_nosp[start:m.start()]
-            if _NEAR_SIZE.search(context):
-                continue
-            try:
-                n = int(m.group(1))
-                if unit_norm == "PALLETS": return n, "PALLETS", "pallet"
-                if unit_norm == "LOADS": return n, "LOADS", "load"
-                if unit_norm == "CS": return n, "CS", "case"
-            except:
-                continue
-    if re.search(r"\bvolume|volumen\b", s_nosp): return None, "VOLUME", "category"
-    if re.search(r"\blimited|limitado\b", s_nosp): return None, "LIMITED", "category"
-    if re.search(r"\bn/?a\b", s_nosp): return None, "NA", "category"
-    return None, None, None
-
-def _parse_volume_fields(df_norm: pd.DataFrame):
-    nums, units, stds = [], [], []
-    for _, row in df_norm.iterrows():
-        n, u, s = _parse_volume_from_texts(row.get("Product"), row.get("Size"), row.get("Volume"))
-        nums.append(n); units.append(u); stds.append(s)
-    return pd.Series(nums), pd.Series(units), pd.Series(stds)
-
-# ------------------------
-# Normalización final y subida
-# ------------------------
-def _normalize_to_quotations(df_norm: pd.DataFrame) -> pd.DataFrame:
-    out = pd.DataFrame()
-    out["cotization_date"] = df_norm["Date"].apply(_cot_date_to_mdy_text)
-    ogcv = df_norm["OG/CV"].astype(str).str.upper().str.extract(r"(OG|CV)", expand=False)
-    out["organic"] = (ogcv == "OG").astype(int)
-    out["product"] = df_norm["Product"]
-    out["location"] = df_norm["Where"]
-    out["concat"] = df_norm["Concat"]
-    out["price"] = df_norm["Price"]
-    out["size_text"] = df_norm["Size"].astype(str).str.strip().replace({"None": None, "nan": None, "": None})
-    vol_num, vol_unit, vol_std = _parse_volume_fields(df_norm)
-    out["volume_num"], out["volume_unit"], out["volume_standard"] = vol_num, vol_unit, vol_std
-    out["vendorclean"] = df_norm["Supplier"].astype(str).str.strip()
-    out["source_chat_id"] = None
-    out["source_message_id"] = None
-    cols = ["cotization_date","organic","product","price","location","concat",
-            "size_text","volume_num","volume_unit","volume_standard","vendorclean",
-            "source_chat_id","source_message_id"]
-    return out[cols]
-
-def upload_to_supabase_for_quotations(df_norm: pd.DataFrame) -> str:
-    url, key, schema, table_name = _get_supabase_block("supabase_quotes")
-    if not url or not key:
-        return "Faltan credenciales en [supabase_quotes]."
-    if create_client is None:
-        return "Paquete 'supabase' no disponible."
-    client = create_client(url, key)
-    df_q = _normalize_to_quotations(df_norm)
-    df_q = df_q.astype(object).where(pd.notnull(df_q), None)
-    records = df_q.to_dict(orient="records")
+def _volume_str(row) -> str:
+    q = row.get("volume_num")
+    u = (row.get("volume_unit") or "").strip()
     try:
-        client.schema(schema).table(table_name).upsert(
-            records,
-            on_conflict=("cotization_date,organic,product,price,location,concat,"
-                         "volume_num,volume_unit,volume_standard,vendorclean,"
-                         "source_chat_id,source_message_id")
-        ).execute()
-        return f"Subida completa: {len(records)} filas a '{schema}.{table_name}'."
+        q = float(q)
+        q = int(q) if float(q).is_integer() else q
+    except Exception:
+        q = ""
+    return f"{q} {u}".strip()
+
+def _format_price(x) -> str:
+    try:
+        return f"${float(x):,.2f}"
+    except Exception:
+        return ""
+
+def _family_from_product(p: str) -> str:
+    s = (p or "").lower()
+    if any(k in s for k in ["tomato", "roma", "round", "grape"]):
+        return "Tomato"
+    if any(k in s for k in ["squash", "zucchini", "gray"]):
+        return "Soft Squash"
+    if "cucumber" in s or "cuke" in s:
+        return "Cucumbers"
+    if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano"]):
+        return "Bell Peppers"
+    return "Others"
+
+def _norm_name(x: str) -> str:
+    if not isinstance(x, str):
+        return ""
+    s = x.strip()
+    return s[:1].upper() + s[1:].lower() if s else s
+
+# =====================
+# Diccionario de emojis por commodity
+# =====================
+commodities_emojis = {
+    "Acorn Squash": "🎃", "Anaheim": "🌶️", "Apple": "🍎", "Asparagus": "🥦", "Avocado": "🥑",
+    "Banana": "🍌", "Beefsteak Tomato": "🍅", "Bi-Color Corn": "🌽", "Blueberries": "🫐",
+    "Broccoli": "🥦", "Brussels": "🥬", "Butternut": "🎃", "Cantaloupe": "🍈", "Caribe": "🌶️",
+    "Cauliflower": "🥦", "Celery": "🥒", "Cherry Tomato": "🍅", "Cilantro": "🌿",
+    "Cocktail Cukes": "🥒", "Cocktail Tomato": "🍅", "Coleslaw": "🥗",
+    "Cucumber European": "🥒", "Cucumber Persian": "🥒", "Cucumber Slicer": "🥒",
+    "Delicata": "🎃", "Eggplant": "🍆", "Freight": "🚚", "Garlic": "🧄", "Ginger": "🫚",
+    "Grape Tomato": "🍅", "Grapes Early Sweet": "🍇", "Green Beans": "🫛",
+    "Green Bell Pepper": "🫑", "Green Onions": "🧅", "Green Plantain": "🍌", "Grey Squash": "🎃",
+    "Habanero": "🌶️🔥", "Heirloom Tomato": "🍅", "Honeydew": "🍈", "Jalapeã±O": "🌶️",
+    "Kabocha": "🎃", "Lemon": "🍋", "Lettuce": "🥬", "Logistic": "📦", "Mango": "🥭",
+    "Material": "📦", "Medley": "🥗", "Minisweet Pepper": "🫑", "Orange Bell Pepper": "🟧🫑",
+    "Other": "📦", "Palermo Pepper": "🌶️", "Papaya": "🍈", "Pasilla": "🌶️",
+    "Pepper Jalapeño": "🌶️", "Persian Lime": "🍈", "Pickle": "🥒", "Pineapple": "🍍",
+    "Poblano": "🌶️", "Raspberries": "🍓", "Red Bell Pepper": "🟥🫑", "Red Cabbage": "🥬",
+    "Red Onion": "🧅", "Roma Tomato": "🍅", "Romaine": "🥬", "Round Tomato": "🍅",
+    "Serrano": "🌶️", "Shishito": "🌶️", "Spaghetti": "🍝", "Strawberry": "🍓",
+    "Tariff": "💲", "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "Tov Tomato": "🍅",
+    "Watermelon": "🍉", "White Corn": "🌽", "White Onion": "🧅", "Yellow Bell Pepper": "🟨🫑",
+    "Yellow Corn": "🌽", "Yellow Onion": "🧅", "Yellow Squash": "🎃", "Zucchini": "🥒"
+}
+
+def add_emoji_to_product(p: str) -> str:
+    """Adjunta un emoji al producto si hay match exacto o parcial (no afecta filtros ni gráficos)."""
+    if not isinstance(p, str) or not p.strip():
+        return ""
+    for key, emoji in commodities_emojis.items():
+        if key.lower() in p.lower():
+            return f"{emoji} {p}"
+    return p
+
+# ------------------------
+# Supabase helpers (by sections)
+# ------------------------
+def _read_section(section_name: str) -> dict:
+    """
+    Reads a section from st.secrets (e.g., 'supabase_quotes') and validates minimal keys.
+    Expects:
+      url, anon_key, table (default: quotations), schema (default: public)
+    """
+    try:
+        sec = st.secrets[section_name]
+    except Exception:
+        raise KeyError(f"Section '{section_name}' not found in st.secrets.")
+    for k in ("url", "anon_key"):
+        if k not in sec or not str(sec[k]).strip():
+            raise KeyError(f"Missing or empty '{k}' in st.secrets['{section_name}'].")
+    sec = dict(sec)
+    sec["table"] = sec.get("table", "").strip() or "quotations"
+    sec["schema"] = sec.get("schema", "").strip() or "public"
+    return sec
+
+def _create_client(url: str, key: str):
+    try:
+        from supabase import create_client
     except Exception as e:
-        return f"Error al subir: {e}"
+        raise ImportError(f"'supabase' is missing in requirements.txt: {e}")
+    return create_client(url, key)
+
+def _sb_table(sb, schema: str, table: str):
+    """Returns a table handle respecting schema if the client supports it."""
+    try:
+        return sb.schema(schema).table(table)  # supabase-py v2+
+    except Exception:
+        return sb.table(table)                 # fallback v1
+
+# ------------------------
+# Data fetch (Supabase — uses section supabase_quotes)
+# ------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_all_quotations_from_supabase():
+    """Fetch quotations in pages using the [supabase_quotes] section."""
+    try:
+        cfg = _read_section("supabase_quotes")
+        sb = _create_client(cfg["url"], cfg["anon_key"])
+        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
+    except Exception as e:
+        st.error(f"Invalid Supabase config/client: {e}")
+        return pd.DataFrame()
+
+    frames, page_size = [], 1000
+    for i in range(1000):
+        start, end = i * page_size, i * page_size + page_size - 1
+        try:
+            resp = (
+                tbl.select(
+                    "id,cotization_date,organic,product,price,location,"
+                    "volume_num,volume_unit,volume_standard,vendorclean,"
+                    "size_text"
+                )
+                .range(start, end)
+                .execute()
+            )
+        except Exception as e:
+            st.error(f"Error querying Supabase: {e}")
+            return pd.DataFrame()
+
+        rows = getattr(resp, "data", None) or []
+        if not rows:
+            break
+        frames.append(pd.DataFrame(rows))
+        if len(rows) < page_size:
+            break
+
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if df.empty:
+        return df
+
+    # Minimal normalization
+    df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
+    df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
+    df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
+    df["volume_unit"] = df["volume_unit"].astype(str).fillna("unit")
+    if "size_text" not in df.columns:
+        df["size_text"] = pd.NA
+    df = df.rename(columns={
+        "product":"Product",
+        "location":"Location",
+        "vendorclean":"VendorClean"
+    })
+    return df
 
 # ------------------------
 # UI
 # ------------------------
-st.subheader("1) Pega tus cotizaciones aquí")
-pasted = st.text_area("Pegar datos", value="", height=220)
+st.title("Daily Sheet")
 
-if pasted:
-    raw_df = _read_pasted(pasted)
-    if raw_df.empty:
-        st.error("No pude leer la tabla pegada.")
-        st.stop()
-    st.success(f"Detecté {raw_df.shape[0]} filas × {raw_df.shape[1]} columnas.")
+# Centered logo + utilities
+colA, colB, colC = st.columns([1, 2, 1])
+with colB:
+    if os.path.exists(LOGO_PATH):
+        st.image(LOGO_PATH, use_container_width=True)
+    else:
+        st.info("Logo not found. Check 'data/Asset 7@4x.png'.")
 
-    suggested = _suggest_mappings(list(raw_df.columns))
-    colmap = {std_col: suggested.get(std_col) for std_col in STANDARD_COLS}
-    norm_df = _normalize(raw_df, colmap)
+cc1, cc2 = st.columns(2)
+with cc1:
+    if st.button("🧹 Clear data cache"):
+        st.cache_data.clear()
+        st.success("Cache cleared. Reload the page or use 'Force rerun'.")
+with cc2:
+    if st.button("🔄 Force rerun"):
+        st.rerun()
 
-    st.subheader("2) Previsualización normalizada")
-    st.dataframe(norm_df, use_container_width=True)
+df = fetch_all_quotations_from_supabase()
 
-    preview_payload = _normalize_to_quotations(norm_df).copy()
-    st.subheader("3) Payload a subir (vista previa)")
-    st.dataframe(preview_payload, use_container_width=True)
+if df.empty:
+    st.info("No data available from Supabase yet.")
+    st.caption("Page under construction — day view coming soon.")
+    st.stop()
 
-    problems_preview = _validate(norm_df)
-    allow_upload = True
-    if problems_preview:
-        with st.expander("Ver advertencias"):
-            for p in problems_preview:
-                st.warning(p)
-        allow_upload = st.checkbox("Entiendo las advertencias y deseo subir igual", value=False)
+# Normalized date column
+df["_date"] = pd.to_datetime(df["cotization_date"], errors="coerce").dt.date
+valid_dates = df["_date"].dropna()
+if valid_dates.empty:
+    st.warning("Could not parse any date in 'cotization_date'.")
+    st.stop()
 
-    if st.button("⬆️ Subir estas filas ahora", type="primary", disabled=not allow_upload):
-        with st.spinner("Subiendo a Supabase..."):
-            msg = upload_to_supabase_for_quotations(norm_df)
-        (st.success if msg.startswith("Subida completa") else st.error)(msg)
+# Date selector in mm/dd/yyyy
+default_date = max(valid_dates)
+sel_date = st.date_input("Date to display", value=default_date, format="MM/DD/YYYY")
 
-st.caption("Fin de la lógica — Upload Quotes — Paste Mode")
+# Day subset
+day_df = df[df["_date"] == sel_date].copy()
+if day_df.empty:
+    st.warning("No quotations for the selected date.")
+    st.stop()
+
+# Derived fields
+day_df["Vendor"]  = day_df["VendorClean"]
+day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
+day_df["Where"]   = day_df["Location"]
+day_df["Size"]    = day_df.apply(_choose_size, axis=1)
+day_df["Volume"]  = day_df.apply(_volume_str, axis=1)   # ← Final display name
+day_df["Price$"]  = day_df["Price"].apply(_format_price)
+day_df["Family"]  = day_df["Product"].apply(_family_from_product)
+day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
+
+# ---------- Day view filters ----------
+# ↑ Pasamos de 5 a 6 columnas para incluir filtro por Family
+cols = st.columns(6)
+
+with cols[0]:
+    product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_products = st.multiselect("Products (available)", options=product_options, default=product_options)
+
+with cols[1]:
+    locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_locs = st.multiselect("Locations", options=locs, default=locs)
+
+# 🆕 Filtro por categoría OG/CV
+with cols[2]:
+    cat_options = ["Conventional (CV)", "Organic (OG)"]
+    sel_cat = st.multiselect(
+        "Category (OG/CV)",
+        options=cat_options,
+        default=cat_options,
+        help="Filtra por productos Convencionales u Orgánicos."
+    )
+
+# 🆕 Filtro por Family (no se muestra en la tabla, solo para filtrar)
+with cols[3]:
+    fam_options = sorted([x for x in day_df["Family"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_fams = st.multiselect("Family (filter only)", options=fam_options, default=fam_options)
+
+with cols[4]:
+    search = st.text_input("Search product (contains)", "")
+
+with cols[5]:
+    sort_opt = st.selectbox("Sort by", ["Product", "Vendor", "Where", "Price (asc)", "Price (desc)"])
+
+# ---- Apply filters ----
+if sel_products:
+    day_df = day_df[day_df["Product"].isin(sel_products)]
+
+if sel_locs:
+    day_df = day_df[day_df["Where"].isin(sel_locs)]
+
+# 🆕 Aplicación del filtro de categoría OG/CV
+if sel_cat:
+    allowed = set()
+    if "Conventional (CV)" in sel_cat:
+        allowed.add("CV")
+    if "Organic (OG)" in sel_cat:
+        allowed.add("OG")
+    if allowed:  # evitar tabla vacía accidental
+        day_df = day_df[day_df["OG/CV"].isin(allowed)]
+
+# 🆕 Aplicación del filtro Family
+if sel_fams:
+    day_df = day_df[day_df["Family"].isin(sel_fams)]
+
+if search.strip():
+    s = search.strip().lower()
+    day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
+
+# Ordering
+if sort_opt == "Price (asc)":
+    day_df = day_df.sort_values("Price", ascending=True)
+elif sort_opt == "Price (desc)":
+    day_df = day_df.sort_values("Price", ascending=False)
+else:
+    day_df = day_df.sort_values(sort_opt)
+
+# ---------- Edit mode (Size edits size_text) ----------
+st.divider()
+edit_mode = st.toggle(
+    "✏️ Edit mode (everything except date)",
+    value=False,
+    help="Edit Vendor, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. Date is locked."
+)
+
+if edit_mode:
+    edit_df = day_df[[
+        "id", "cotization_date", "VendorClean", "Location", "Product",
+        "size_text", "Organic", "Price", "volume_num", "volume_unit"
+    ]].copy()
+
+    edit_df = edit_df.rename(columns={
+        "VendorClean": "Vendor",
+        "Location": "Where",
+        "size_text": "Size",     # UI muestra "Size" pero persiste en size_text
+        "Organic": "organic",
+        "Price": "price",
+    })
+
+    col_config = {
+        "id": st.column_config.TextColumn("ID", disabled=True),
+        "cotization_date": st.column_config.DatetimeColumn("Date", format="MM/DD/YYYY", disabled=True),
+        "Vendor": st.column_config.TextColumn("Vendor"),
+        "Where": st.column_config.TextColumn("Where"),
+        "Product": st.column_config.TextColumn("Product"),
+        "Size": st.column_config.TextColumn("Size (size_text)"),
+        "organic": st.column_config.NumberColumn("OG/CV (1=OG,0=CV)", min_value=0, max_value=1, step=1),
+        "price": st.column_config.NumberColumn("Price", min_value=0.0, step=0.01),
+        "volume_num": st.column_config.NumberColumn("Volume Qty", min_value=0.0, step=0.01),
+        "volume_unit": st.column_config.TextColumn("Volume Unit"),
+    }
+
+    st.caption("Edit the fields and click **Save changes**.")
+    edited_df = st.data_editor(
+        edit_df,
+        key="editor_all",
+        num_rows="fixed",
+        use_container_width=True,
+        column_config=col_config,
+        column_order=["id","cotization_date","Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]
+    )
+
+    if st.button("💾 Save changes", type="primary", use_container_width=True):
+        ORIG = edit_df.set_index("id")[["Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]]
+        NEW  = edited_df.set_index("id")[["Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]]
+
+        changed_mask = (ORIG != NEW) & ~(ORIG.isna() & NEW.isna())
+        dirty_ids = NEW.index[changed_mask.any(axis=1)].tolist()
+
+        if not dirty_ids:
+            st.success("No changes to save.")
+        else:
+            payload = []
+            for _id in dirty_ids:
+                ui_row = NEW.loc[_id].to_dict()
+
+                # Types
+                for k in ["price", "volume_num"]:
+                    v = ui_row.get(k)
+                    try:
+                        ui_row[k] = float(v) if v not in (None, "") else None
+                    except Exception:
+                        pass
+                v = ui_row.get("organic")
+                try:
+                    ui_row["organic"] = int(v) if v not in (None, "") else None
+                except Exception:
+                    pass
+
+                # UI -> DB
+                db_row = {
+                    "vendorclean": ui_row.get("Vendor"),
+                    "location": ui_row.get("Where"),
+                    "product": ui_row.get("Product"),
+                    "size_text": ui_row.get("Size"),
+                    "organic": ui_row.get("organic"),
+                    "price": ui_row.get("price"),
+                    "volume_num": ui_row.get("volume_num"),
+                    "volume_unit": ui_row.get("volume_unit"),
+                }
+                clean_db_row = {k: v for k, v in db_row.items() if v is not None}
+                if not clean_db_row:
+                    continue
+                payload.append({"id": _id, **clean_db_row})
+
+            try:
+                cfg = _read_section("supabase_quotes")
+                sb = _create_client(cfg["url"], cfg["anon_key"])
+                tbl = _sb_table(sb, cfg["schema"], cfg["table"])
+
+                for item in payload:
+                    _id = item.pop("id")
+                    tbl.update(item).eq("id", _id).execute()
+
+                st.success(f"Updated {len(payload)} record(s). 🎉")
+                st.balloons()
+
+                # Refresh local day_df
+                upd = NEW.loc[dirty_ids].reset_index()
+                upd = upd.rename(columns={
+                    "Vendor":"VendorClean",
+                    "Where":"Location",
+                    "price":"Price",
+                    "Size":"size_text",
+                })
+                for _, r in upd.iterrows():
+                    mask = day_df["id"] == r["id"]
+                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit","size_text"]:
+                        if col in r and pd.notna(r[col]):
+                            day_df.loc[mask, col] = r[col]
+
+                # Derivatives (recalcular columnas derivadas)
+                day_df["Vendor"] = day_df["VendorClean"]
+                day_df["Where"]  = day_df["Location"]
+                day_df["Price$"] = day_df["Price"].apply(_format_price)
+                day_df["Size"]   = day_df.apply(_choose_size, axis=1)
+                day_df["Volume"] = day_df.apply(_volume_str, axis=1)
+
+            except Exception as e:
+                st.error(f"Error saving changes: {e}")
+
+# ---------- Read-only pretty table ----------
+# Ocultamos Date y Family de la vista, pero Family se usa para filtrar arriba
+# Emojis SOLO para la tabla/CSV (no alteran day_df usado en filtros y gráficos)
+display_df = day_df.copy()
+display_df["Product"] = display_df["Product"].apply(add_emoji_to_product)
+
+# Orden de columnas personalizado
+ordered_cols = ["Product", "Price$", "Size", "Where", "Volume", "OG/CV", "Vendor"]
+show = display_df[ordered_cols].reset_index(drop=True)
+
+st.dataframe(show, use_container_width=True)
+
+# CSV export con el mismo orden y con emojis
+csv_bytes = show.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "⬇️ Download CSV (day view)",
+    data=csv_bytes,
+    file_name=f"daily_sheet_{sel_date.strftime('%m-%d-%Y')}.csv",
+    mime="text/csv"
+)
+
+# =========================
+# 📊 Visualizations (BASED on the visible *data*, sin emojis)
+# =========================
+st.markdown("## 📊 Visualizations (current table)")
+
+if not ALTAIR_OK:
+    st.warning("Altair is not installed. Add `altair>=5` to requirements.txt and restart the app.")
+else:
+    viz_day = day_df.copy()
+
+    if viz_day.empty:
+        st.info("There are no rows in the current table to plot.")
+    else:
+        viz_day["price_num"] = pd.to_numeric(viz_day["Price"], errors="coerce")
+        viz_day["volume_num"] = pd.to_numeric(viz_day["volume_num"], errors="coerce")
+        viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
+        viz_day["Vendor_norm"] = viz_day["Vendor"].apply(_norm_name)
+
+        # ---- Quick KPIs (from visible rows) ----
+        c_k1, c_k2, c_k3, c_k4 = st.columns(4)
+        with c_k1:
+            mean_price = viz_day["price_num"].mean()
+            st.metric("Average price (table)", f"{mean_price:.2f}" if pd.notna(mean_price) else "—")
+        with c_k2:
+            min_price = viz_day["price_num"].min()
+            st.metric("Min price (table)", f"{min_price:.2f}" if pd.notna(min_price) else "—")
+        with c_k3:
+            max_price = viz_day["price_num"].max()
+            st.metric("Max price (table)", f"{max_price:.2f}" if pd.notna(max_price) else "—")
+        with c_k4:
+            st.metric("Visible offers", f"{len(viz_day)}")
+
+        # ---- 1) Average price by location (bars) ----
+        g_loc = (viz_day.groupby("Where_norm", as_index=False)
+                        .agg(avg_price=("price_num","mean"),
+                             offers=("Where_norm","count")))
+        if not g_loc.empty:
+            chart_loc = alt.Chart(g_loc).mark_bar().encode(
+                x=alt.X("avg_price:Q", title="Average price"),
+                y=alt.Y("Where_norm:N", sort="-x", title="Location"),
+                tooltip=["Where_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Average price by location (visible table)", height=320)
+            st.altair_chart(chart_loc, use_container_width=True)
+
+        # ---- 2) Average price by vendor (bars) ----
+        g_vendor = (viz_day.groupby("Vendor_norm", as_index=False)
+                         .agg(avg_price=("price_num","mean"),
+                              offers=("Vendor_norm","count")))
+        if not g_vendor.empty:
+            chart_vendor = alt.Chart(g_vendor).mark_bar().encode(
+                x=alt.X("avg_price:Q", title="Average price"),
+                y=alt.Y("Vendor_norm:N", sort="-x", title="Vendor"),
+                tooltip=["Vendor_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Average price by vendor (visible table)", height=350)
+            st.altair_chart(chart_vendor, use_container_width=True)
+
+        # ---- 3) Volume by vendor (bars) ----
+        g_vol = (viz_day.groupby("Vendor_norm", as_index=False)
+                        .agg(total_volume=("volume_num","sum")))
+        g_vol = g_vol[g_vol["total_volume"].fillna(0) > 0]
+        if not g_vol.empty:
+            chart_vol = alt.Chart(g_vol).mark_bar().encode(
+                x=alt.X("total_volume:Q", title="Total volume"),
+                y=alt.Y("Vendor_norm:N", sort="-x", title="Vendor"),
+                tooltip=["Vendor_norm:N", alt.Tooltip("total_volume:Q", format=",.0f")]
+            ).properties(title="Volume by vendor (visible table)", height=350)
+            st.altair_chart(chart_vol, use_container_width=True)
+
+        # ---- 4) Average price by product (bars) ----
+        g_prod = (viz_day.groupby("Product", as_index=False)
+                          .agg(avg_price=("price_num","mean"),
+                               offers=("Product","count")))
+        if not g_prod.empty and g_prod["Product"].nunique() > 1:
+            chart_prod = alt.Chart(g_prod).mark_bar().encode(
+                x=alt.X("avg_price:Q", title="Average price"),
+                y=alt.Y("Product:N", sort="-x", title="Product"),
+                tooltip=["Product:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
+            ).properties(title="Average price by product (visible table)", height=350)
+            st.altair_chart(chart_prod, use_container_width=True)
+
+        # ---- 5) Scatter Price vs Volume (outliers) ----
+        if viz_day["volume_num"].fillna(0).sum() > 0:
+            scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
+                x=alt.X("price_num:Q", title="Price"),
+                y=alt.Y("volume_num:Q", title="Volume"),
+                tooltip=["Product","Vendor_norm","Where_norm",
+                         alt.Tooltip("price_num:Q", format=".2f"),
+                         alt.Tooltip("volume_num:Q", format=",.0f")]
+            ).properties(title="Price vs Volume (visible table)", height=320)
+            st.altair_chart(scatter, use_container_width=True)
