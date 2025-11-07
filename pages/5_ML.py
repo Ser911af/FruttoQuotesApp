@@ -1,5 +1,5 @@
 # app.py
-# FruttoFoods Daily Sheet — con filtro de categoría OG/CV, filtro Family y ocultar Date/Family en la tabla
+# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom column order
 
 import streamlit as st
 import pandas as pd
@@ -26,7 +26,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Visible version tag to confirm deployment ----
-VERSION = "Daily_Sheet v2025-11-07 — hide Date/Family + Family filter"
+VERSION = "Daily_Sheet v2025-11-07 — hide Date/Family + Family filter + Product emojis + custom order"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -100,6 +100,41 @@ def _norm_name(x: str) -> str:
         return ""
     s = x.strip()
     return s[:1].upper() + s[1:].lower() if s else s
+
+# =====================
+# Diccionario de emojis por commodity
+# =====================
+commodities_emojis = {
+    "Acorn Squash": "🎃", "Anaheim": "🌶️", "Apple": "🍎", "Asparagus": "🥦", "Avocado": "🥑",
+    "Banana": "🍌", "Beefsteak Tomato": "🍅", "Bi-Color Corn": "🌽", "Blueberries": "🫐",
+    "Broccoli": "🥦", "Brussels": "🥬", "Butternut": "🎃", "Cantaloupe": "🍈", "Caribe": "🌶️",
+    "Cauliflower": "🥦", "Celery": "🥒", "Cherry Tomato": "🍅", "Cilantro": "🌿",
+    "Cocktail Cukes": "🥒", "Cocktail Tomato": "🍅", "Coleslaw": "🥗",
+    "Cucumber European": "🥒", "Cucumber Persian": "🥒", "Cucumber Slicer": "🥒",
+    "Delicata": "🎃", "Eggplant": "🍆", "Freight": "🚚", "Garlic": "🧄", "Ginger": "🫚",
+    "Grape Tomato": "🍅", "Grapes Early Sweet": "🍇", "Green Beans": "🫛",
+    "Green Bell Pepper": "🫑", "Green Onions": "🧅", "Green Plantain": "🍌", "Grey Squash": "🎃",
+    "Habanero": "🌶️🔥", "Heirloom Tomato": "🍅", "Honeydew": "🍈", "Jalapeã±O": "🌶️",
+    "Kabocha": "🎃", "Lemon": "🍋", "Lettuce": "🥬", "Logistic": "📦", "Mango": "🥭",
+    "Material": "📦", "Medley": "🥗", "Minisweet Pepper": "🫑", "Orange Bell Pepper": "🟧🫑",
+    "Other": "📦", "Palermo Pepper": "🌶️", "Papaya": "🍈", "Pasilla": "🌶️",
+    "Pepper Jalapeño": "🌶️", "Persian Lime": "🍈", "Pickle": "🥒", "Pineapple": "🍍",
+    "Poblano": "🌶️", "Raspberries": "🍓", "Red Bell Pepper": "🟥🫑", "Red Cabbage": "🥬",
+    "Red Onion": "🧅", "Roma Tomato": "🍅", "Romaine": "🥬", "Round Tomato": "🍅",
+    "Serrano": "🌶️", "Shishito": "🌶️", "Spaghetti": "🍝", "Strawberry": "🍓",
+    "Tariff": "💲", "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "Tov Tomato": "🍅",
+    "Watermelon": "🍉", "White Corn": "🌽", "White Onion": "🧅", "Yellow Bell Pepper": "🟨🫑",
+    "Yellow Corn": "🌽", "Yellow Onion": "🧅", "Yellow Squash": "🎃", "Zucchini": "🥒"
+}
+
+def add_emoji_to_product(p: str) -> str:
+    """Adjunta un emoji al producto si hay match exacto o parcial (no afecta filtros ni gráficos)."""
+    if not isinstance(p, str) or not p.strip():
+        return ""
+    for key, emoji in commodities_emojis.items():
+        if key.lower() in p.lower():
+            return f"{emoji} {p}"
+    return p
 
 # ------------------------
 # Supabase helpers (by sections)
@@ -440,10 +475,17 @@ if edit_mode:
 
 # ---------- Read-only pretty table ----------
 # Ocultamos Date y Family de la vista, pero Family se usa para filtrar arriba
-show = day_df[["Vendor","Where","OG/CV","Product","Size","Volume","Price$"]].reset_index(drop=True)
+# Emojis SOLO para la tabla/CSV (no alteran day_df usado en filtros y gráficos)
+display_df = day_df.copy()
+display_df["Product"] = display_df["Product"].apply(add_emoji_to_product)
+
+# Orden de columnas personalizado
+ordered_cols = ["Product", "Price$", "Size", "Where", "Volume", "OG/CV", "Vendor"]
+show = display_df[ordered_cols].reset_index(drop=True)
+
 st.dataframe(show, use_container_width=True)
 
-# CSV download con la misma vista (sin Date/Family)
+# CSV export con el mismo orden y con emojis
 csv_bytes = show.to_csv(index=False).encode("utf-8")
 st.download_button(
     "⬇️ Download CSV (day view)",
@@ -453,7 +495,7 @@ st.download_button(
 )
 
 # =========================
-# 📊 Visualizations (BASED on the visible table)
+# 📊 Visualizations (BASED on the visible *data*, sin emojis)
 # =========================
 st.markdown("## 📊 Visualizations (current table)")
 
@@ -542,15 +584,3 @@ else:
                          alt.Tooltip("volume_num:Q", format=",.0f")]
             ).properties(title="Price vs Volume (visible table)", height=320)
             st.altair_chart(scatter, use_container_width=True)
-
-        # ---- 6) Extremes table ----
-        with st.expander("🔎 View price extremes (visible table)"):
-            tmp = viz_day[["Product","Vendor","Where","price_num","Volume"]].dropna(subset=["price_num"]).copy()
-            tmp = tmp.sort_values("price_num")
-            c1, c2 = st.columns(2)
-            with c1:
-                st.write("**Bottom 5 (cheapest)**")
-                st.dataframe(tmp.head(5).rename(columns={"price_num":"Price"}), use_container_width=True)
-            with c2:
-                st.write("**Top 5 (most expensive)**")
-                st.dataframe(tmp.tail(5).rename(columns={"price_num":"Price"}), use_container_width=True)
