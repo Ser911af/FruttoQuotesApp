@@ -1,5 +1,5 @@
 # app.py
-# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom order + CONCAT column
+# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom order + Concat (emoji primero)
 
 import streamlit as st
 import pandas as pd
@@ -26,7 +26,7 @@ except Exception:
 st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
 
 # ---- Visible version tag to confirm deployment ----
-VERSION = "Daily_Sheet v2025-11-07 — hide Date/Family + Family filter + Product emojis + custom order + Concat"
+VERSION = "Daily_Sheet v2025-11-07 — Concat emoji-first"
 st.caption(VERSION)
 
 LOGO_PATH = "data/Asset 7@4x.png"
@@ -86,9 +86,9 @@ def _family_from_product(p: str) -> str:
     s = (p or "").lower()
     if any(k in s for k in ["tomato", "roma", "round", "grape", "heirloom", "tov"]):
         return "Tomato"
-    if any(k in s for k in ["squash", "zucchini", "gray", "grey"]):
+    if any(k in s for k in ["squash", "zucchini", "gray", "grey", "kabocha", "acorn", "butternut", "delicata", "spaghetti"]):
         return "Soft Squash"
-    if "cucumber" in s or "cuke" in s:
+    if "cucumber" in s or "cuke" in s or "pickle" in s:
         return "Cucumbers"
     if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano", "pasilla", "anaheim", "shishito", "palermo"]):
         return "Bell Peppers"
@@ -113,18 +113,19 @@ commodities_emojis = {
     "Delicata": "🎃", "Eggplant": "🍆", "Freight": "🚚", "Garlic": "🧄", "Ginger": "🫚",
     "Grape Tomato": "🍅", "Grapes Early Sweet": "🍇", "Green Beans": "🫛",
     "Green Bell Pepper": "🫑", "Green Onions": "🧅", "Green Plantain": "🍌", "Grey Squash": "🎃",
-    "Habanero": "🌶️🔥", "Heirloom": "🍅", "Heirloom Tomato": "🍅", "Honeydew": "🍈", "Jalapeã±O": "🌶️",
-    "Kabocha": "🎃", "Lemon": "🍋", "Lettuce": "🥬", "Logistic": "📦", "Mango": "🥭",
-    "Material": "📦", "Medley": "🥗", "Minisweet Pepper": "🫑", "Orange Bell Pepper": "🟧🫑",
-    "Other": "📦", "Palermo Pepper": "🌶️", "Papaya": "🍈", "Pasilla": "🌶️",
-    "Pepper Jalapeño": "🌶️", "Persian Lime": "🍈", "Pickle": "🥒", "Pineapple": "🍍",
-    "Poblano": "🌶️", "Raspberries": "🍓", "Red Bell Pepper": "🟥🫑", "Red Cabbage": "🥬",
-    "Red Onion": "🧅", "Roma Tomato": "🍅", "Romaine": "🥬", "Round Tomato": "🍅",
-    "Serrano": "🌶️", "Shishito": "🌶️", "Spaghetti": "🍝", "Strawberry": "🍓",
-    "Tariff": "💲", "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "TOV (Tomato on Vine)": "🍅",
-    "Watermelon": "🍉", "White Corn": "🌽", "White Onion": "🧅", "Yellow Bell Pepper": "🟨🫑",
-    "Yellow Corn": "🌽", "Yellow Onion": "🧅", "Yellow Squash": "🎃", "Zucchini": "🥒",
-    "English Cucumber": "🥒"
+    "Habanero": "🌶️🔥", "Heirloom": "🍅", "Heirloom Tomato": "🍅", "Honeydew": "🍈",
+    "Jalapeã±O": "🌶️", "Kabocha": "🎃", "Lemon": "🍋", "Lettuce": "🥬", "Logistic": "📦",
+    "Mango": "🥭", "Material": "📦", "Medley": "🥗", "Minisweet Pepper": "🫑",
+    "Orange Bell Pepper": "🟧🫑", "Other": "📦", "Palermo Pepper": "🌶️",
+    "Papaya": "🍈", "Pasilla": "🌶️", "Pepper Jalapeño": "🌶️", "Persian Lime": "🍈",
+    "Pickle": "🥒", "Pineapple": "🍍", "Poblano": "🌶️", "Raspberries": "🍓",
+    "Red Bell Pepper": "🟥🫑", "Red Cabbage": "🥬", "Red Onion": "🧅",
+    "Roma Tomato": "🍅", "Romaine": "🥬", "Round Tomato": "🍅", "Serrano": "🌶️",
+    "Shishito": "🌶️", "Spaghetti": "🍝", "Strawberry": "🍓", "Tariff": "💲",
+    "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "TOV (Tomato on Vine)": "🍅",
+    "Watermelon": "🍉", "White Corn": "🌽", "White Onion": "🧅",
+    "Yellow Bell Pepper": "🟨🫑", "Yellow Corn": "🌽", "Yellow Onion": "🧅",
+    "Yellow Squash": "🎃", "Zucchini": "🥒", "English Cucumber": "🥒"
 }
 
 def add_emoji_to_product(p: str) -> str:
@@ -134,7 +135,6 @@ def add_emoji_to_product(p: str) -> str:
     for key, emoji in commodities_emojis.items():
         if key.lower() in p.lower():
             return f"{emoji} {p}"
-    # Fallbacks comunes
     pl = p.lower()
     if "heirloom" in pl or "tomato" in pl: return f"🍅 {p}"
     if "english" in pl and "cucumber" in pl: return f"🥒 {p}"
@@ -172,10 +172,9 @@ def _clean_concat_volume(v: str) -> str:
 
 def build_concat_row(row) -> str:
     """
-    {OG/CV} - {Product} {Size} {Volume} {Price$} {emoji}
-    - Vendor ignorado
+    {OG/CV} - {emoji} {Product} {Size} {Volume} {Price$}
+    - Vendor y Where ignorados
     - Volume opcional (limpio)
-    - emoji al final
     """
     ogcv = (row.get("OG/CV") or "").strip()
     product = (row.get("Product") or "").strip()
@@ -184,16 +183,18 @@ def build_concat_row(row) -> str:
     price = (row.get("Price$") or "").strip()
     emoji = product_emoji(product)
 
-    pieces = [ogcv, "-", product]
-    if size:
-        pieces.append(size)
-    if vol:
-        pieces.append(vol)
-    if price:
-        pieces.append(price)
+    # Orden requerido: OG/CV → emoji → Product → Size → Volume → Price$
+    parts = [ogcv, "-"]
     if emoji:
-        pieces.append(emoji)
-    return " ".join([p for p in pieces if str(p).strip() != ""])
+        parts.append(emoji)
+    parts.append(product)
+    if size:
+        parts.append(size)
+    if vol:
+        parts.append(vol)
+    if price:
+        parts.append(price)
+    return " ".join([p for p in parts if str(p).strip() != ""])
 
 # ------------------------
 # Supabase helpers (by sections)
@@ -392,136 +393,12 @@ elif sort_opt == "Price (desc)":
 else:
     day_df = day_df.sort_values(sort_opt)
 
-# ---------- Edit mode (Size edits size_text) ----------
-st.divider()
-edit_mode = st.toggle(
-    "✏️ Edit mode (everything except date)",
-    value=False,
-    help="Edit Vendor, Where, Product, Size (size_text), OG/CV, Price, Volume Qty/Unit. Date is locked."
-)
-
-if edit_mode:
-    edit_df = day_df[[
-        "id", "cotization_date", "VendorClean", "Location", "Product",
-        "size_text", "Organic", "Price", "volume_num", "volume_unit"
-    ]].copy()
-
-    edit_df = edit_df.rename(columns={
-        "VendorClean": "Vendor",
-        "Location": "Where",
-        "size_text": "Size",
-        "Organic": "organic",
-        "Price": "price",
-    })
-
-    col_config = {
-        "id": st.column_config.TextColumn("ID", disabled=True),
-        "cotization_date": st.column_config.DatetimeColumn("Date", format="MM/DD/YYYY", disabled=True),
-        "Vendor": st.column_config.TextColumn("Vendor"),
-        "Where": st.column_config.TextColumn("Where"),
-        "Product": st.column_config.TextColumn("Product"),
-        "Size": st.column_config.TextColumn("Size (size_text)"),
-        "organic": st.column_config.NumberColumn("OG/CV (1=OG,0=CV)", min_value=0, max_value=1, step=1),
-        "price": st.column_config.NumberColumn("Price", min_value=0.0, step=0.01),
-        "volume_num": st.column_config.NumberColumn("Volume Qty", min_value=0.0, step=0.01),
-        "volume_unit": st.column_config.TextColumn("Volume Unit"),
-    }
-
-    st.caption("Edit the fields and click **Save changes**.")
-    edited_df = st.data_editor(
-        edit_df,
-        key="editor_all",
-        num_rows="fixed",
-        use_container_width=True,
-        column_config=col_config,
-        column_order=["id","cotization_date","Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]
-    )
-
-    if st.button("💾 Save changes", type="primary", use_container_width=True):
-        ORIG = edit_df.set_index("id")[["Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]]
-        NEW  = edited_df.set_index("id")[["Vendor","Where","Product","Size","organic","price","volume_num","volume_unit"]]
-
-        changed_mask = (ORIG != NEW) & ~(ORIG.isna() & NEW.isna())
-        dirty_ids = NEW.index[changed_mask.any(axis=1)].tolist()
-
-        if not dirty_ids:
-            st.success("No changes to save.")
-        else:
-            payload = []
-            for _id in dirty_ids:
-                ui_row = NEW.loc[_id].to_dict()
-
-                # Types
-                for k in ["price", "volume_num"]:
-                    v = ui_row.get(k)
-                    try:
-                        ui_row[k] = float(v) if v not in (None, "") else None
-                    except Exception:
-                        pass
-                v = ui_row.get("organic")
-                try:
-                    ui_row["organic"] = int(v) if v not in (None, "") else None
-                except Exception:
-                    pass
-
-                # UI -> DB
-                db_row = {
-                    "vendorclean": ui_row.get("Vendor"),
-                    "location": ui_row.get("Where"),
-                    "product": ui_row.get("Product"),
-                    "size_text": ui_row.get("Size"),
-                    "organic": ui_row.get("organic"),
-                    "price": ui_row.get("price"),
-                    "volume_num": ui_row.get("volume_num"),
-                    "volume_unit": ui_row.get("volume_unit"),
-                }
-                clean_db_row = {k: v for k, v in db_row.items() if v is not None}
-                if not clean_db_row:
-                    continue
-                payload.append({"id": _id, **clean_db_row})
-
-            try:
-                cfg = _read_section("supabase_quotes")
-                sb = _create_client(cfg["url"], cfg["anon_key"])
-                tbl = _sb_table(sb, cfg["schema"], cfg["table"])
-
-                for item in payload:
-                    _id = item.pop("id")
-                    tbl.update(item).eq("id", _id).execute()
-
-                st.success(f"Updated {len(payload)} record(s). 🎉")
-                st.balloons()
-
-                # Refresh local day_df
-                upd = NEW.loc[dirty_ids].reset_index()
-                upd = upd.rename(columns={
-                    "Vendor":"VendorClean",
-                    "Where":"Location",
-                    "price":"Price",
-                    "Size":"size_text",
-                })
-                for _, r in upd.iterrows():
-                    mask = day_df["id"] == r["id"]
-                    for col in ["VendorClean","Location","Product","organic","Price","volume_num","volume_unit","size_text"]:
-                        if col in r and pd.notna(r[col]):
-                            day_df.loc[mask, col] = r[col]
-
-                # Derivatives (recalcular columnas derivadas)
-                day_df["Vendor"] = day_df["VendorClean"]
-                day_df["Where"]  = day_df["Location"]
-                day_df["Price$"] = day_df["Price"].apply(_format_price)
-                day_df["Size"]   = day_df.apply(_choose_size, axis=1)
-                day_df["Volume"] = day_df.apply(_volume_str, axis=1)
-
-            except Exception as e:
-                st.error(f"Error saving changes: {e}")
-
 # ---------- Read-only pretty table ----------
 # 1) Copia para mostrar emojis en Product
 display_df = day_df.copy()
 display_df["Product"] = display_df["Product"].apply(add_emoji_to_product)
 
-# 2) Columna de concatenación (emoji al final, usando los valores SIN modificar)
+# 2) Columna de concatenación (emoji ANTES del producto)
 concat_series = day_df.apply(build_concat_row, axis=1)
 
 # Orden de columnas personalizado + Concat al final
@@ -530,6 +407,10 @@ show = display_df[ordered_cols].copy()
 show["Concat"] = concat_series.values  # última columna
 
 st.dataframe(show, use_container_width=True)
+
+# Bloque de texto para copiar rápidamente todas las líneas concatenadas
+with st.expander("📋 Copy Concat lines"):
+    st.code("\n".join(concat_series.tolist()), language="text")
 
 # CSV export con el mismo orden + Concat
 csv_bytes = show.to_csv(index=False).encode("utf-8")
@@ -558,6 +439,7 @@ else:
         viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
         viz_day["Vendor_norm"] = viz_day["Vendor"].apply(_norm_name)
 
+        # ---- KPIs ----
         c_k1, c_k2, c_k3, c_k4 = st.columns(4)
         with c_k1:
             mean_price = viz_day["price_num"].mean()
@@ -571,6 +453,7 @@ else:
         with c_k4:
             st.metric("Visible offers", f"{len(viz_day)}")
 
+        # ---- Charts ----
         g_loc = (viz_day.groupby("Where_norm", as_index=False)
                         .agg(avg_price=("price_num","mean"),
                              offers=("Where_norm","count")))
