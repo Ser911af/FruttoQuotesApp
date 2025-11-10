@@ -1,509 +1,329 @@
-# app.py
-# FruttoFoods Daily Sheet — OG/CV + Family filter + hide Date/Family + Product emojis + custom order + Concat (emoji primero)
+# pages/02_SQL_Agent.py
+# Streamlit page: Natural language → SQL (ventas_frutto)
+# - Enforces Frutto Foods SQL rules provided by Sergio
+# - Produces: breve explicación, SQL final (```sql```), y sugerencias de índices/alternativas
+# - Ejecuta sólo SELECT, con LIMIT seguro, y muestra resultados + métricas
 
-import streamlit as st
-import pandas as pd
 import os
+import json
 import re
+import textwrap
+import pandas as pd
+import streamlit as st
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
-# ✅ 1) Mandatory login before loading anything heavy
-from simple_auth import ensure_login, logout_button
-
-user = ensure_login()   # If there’s no session, this call should block the page (st.stop)
-with st.sidebar:
-    logout_button()
-
-# (Optional) show current user in the UI
-st.caption(f"Session: {user}")
-
-# ---- Optional Altair (with detection) ----
+# === LLM (LangChain) ===
 try:
-    import altair as alt
-    ALTAIR_OK = True
+    from langchain_openai import ChatOpenAI
 except Exception:
-    ALTAIR_OK = False
+    ChatOpenAI = None
 
-st.set_page_config(page_title="FruttoFoods Daily Sheet", layout="wide")
+# ==========================
+# ⚙️ Configuración
+# ==========================
+st.set_page_config(page_title="SQL Agent — ventas_frutto", layout="wide")
 
-# ---- Visible version tag to confirm deployment ----
-VERSION = "Daily_Sheet v2025-11-07 — Concat emoji-first"
-st.caption(VERSION)
+st.title("🔎 Analista SQL — ventas_frutto")
+st.caption("Consulta tu tabla con lenguaje natural, con reglas de Frutto Foods.")
 
-LOGO_PATH = "data/Asset 7@4x.png"
+# OpenAI key (o Azure OpenAI): usar st.secrets para producción
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
 
-# ------------------------
-# Helpers (parsing & formatting)
-# ------------------------
-_size_regex = re.compile(
-    r"(\d+\s?lb|\d+\s?ct|\d+\s?[xX]\s?\d+|bulk|jbo|xl|lg|med|fancy|4x4|4x5|5x5|60cs)",
-    flags=re.IGNORECASE
+if ChatOpenAI is None:
+    st.error("Falta langchain-openai. Agrega `langchain-openai>=0.2` en requirements.txt")
+
+# DB URL — ejemplo: postgresql+psycopg2://user:pass@host:5432/dbname
+DB_URL = (
+    os.getenv("DATABASE_URL")
+    or st.secrets.get("DATABASE_URL")
+    or st.secrets.get("POSTGRES_URL")
+    or ""
 )
 
-def _size_from_product(p: str) -> str:
-    if not isinstance(p, str):
-        return ""
-    m = _size_regex.search(p)
-    return m.group(1) if m else ""
+@st.cache_resource(show_spinner=False)
+def get_engine() -> Engine:
+    if not DB_URL:
+        raise ValueError("DATABASE_URL no configurada en secrets o variables de entorno.")
+    eng = create_engine(DB_URL, pool_pre_ping=True)
+    return eng
 
-def _choose_size(row) -> str:
-    # 1) Prioritize size_text (original grade/size)
-    stxt = row.get("size_text")
-    if isinstance(stxt, str) and stxt.strip():
-        return stxt.strip()
-    # 2) Legacy fallback: volume_standard
-    vs = row.get("volume_standard")
-    if isinstance(vs, str) and vs.strip():
-        return vs.strip()
-    # 3) Last resort: infer from Product
-    return _size_from_product(row.get("Product", ""))
+# ==========================
+# 📐 Reglas + Esquema
+# ==========================
+FRUTTO_RULES = textwrap.dedent(
+    r"""
+    Rol: Eres un analista de datos senior de Frutto Foods especializado en PostgreSQL.
+    Tarea: traducir preguntas de negocio a consultas SQL correctas y eficientes contra la tabla ventas_frutto.
 
-def _ogcv(x) -> str:
-    try:
-        xi = int(x)
-        return "OG" if xi == 1 else "CV" if xi == 0 else ""
-    except Exception:
-        s = str(x).strip().lower()
-        return "OG" if s in ("organic","org","1","true","sí","si","yes","y") else \
-               "CV" if s in ("conventional","conv","0","false","no","n") else ""
+    📦 Esquema (tabla única)
+    Tabla: ventas_frutto
 
-def _volume_str(row) -> str:
-    q = row.get("volume_num")
-    u = (row.get("volume_unit") or "").strip()
-    try:
-        q = float(q)
-        q = int(q) if float(q).is_integer() else q
-    except Exception:
-        q = ""
-    return f"{q} {u}".strip()
+    Dimensiones (text/numeric):
+      product, commoditie, unit, organic, label, coo, sales_order, invoice_num,
+      invoice_payment_status, sale_location, sales_rep, customer, vendor, buyer_assigned,
+      lot, lot_location, source, frutto, number_market, buyer_product, day
 
-def _format_price(x) -> str:
-    try:
-        return f"${float(x):,.2f}"
-    except Exception:
-        return ""
+    Fechas (usar en este orden para la fecha de la venta):
+      received_date (date) → si es NULL usa reqs_date → most_recent_invoice_paid_date → created_at::date
 
-def _family_from_product(p: str) -> str:
-    s = (p or "").lower()
-    if any(k in s for k in ["tomato", "roma", "round", "grape", "heirloom", "tov"]):
-        return "Tomato"
-    if any(k in s for k in ["squash", "zucchini", "gray", "grey", "kabocha", "acorn", "butternut", "delicata", "spaghetti"]):
-        return "Soft Squash"
-    if "cucumber" in s or "cuke" in s or "pickle" in s:
-        return "Cucumbers"
-    if any(k in s for k in ["pepper", "bell", "jalape", "habanero", "serrano", "pasilla", "anaheim", "shishito", "palermo"]):
-        return "Bell Peppers"
-    return "Others"
+    Métricas (numeric):
+      quantity, cost_per_unit, price_per_unit, total_cost, total_sold_lot_expenses,
+      total_revenue, total_profit_usd, total_profit_pct
 
-def _norm_name(x: str) -> str:
-    if not isinstance(x, str):
-        return ""
-    s = x.strip()
-    return s[:1].upper() + s[1:].lower() if s else s
+    Fecha de referencia (alias obligatorio cuando haya filtros o agrupaciones por día):
+      date := COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date)
 
-# =====================
-# Diccionario de emojis por commodity
-# =====================
-commodities_emojis = {
-    "Acorn Squash": "🎃", "Anaheim": "🌶️", "Apple": "🍎", "Asparagus": "🥦", "Avocado": "🥑",
-    "Banana": "🍌", "Beefsteak Tomato": "🍅", "Bi-Color Corn": "🌽", "Blueberries": "🫐",
-    "Broccoli": "🥦", "Brussels": "🥬", "Butternut": "🎃", "Cantaloupe": "🍈", "Caribe": "🌶️",
-    "Cauliflower": "🥦", "Celery": "🥒", "Cherry Tomato": "🍅", "Cilantro": "🌿",
-    "Cocktail Cukes": "🥒", "Cocktail Tomato": "🍅", "Coleslaw": "🥗",
-    "Cucumber European": "🥒", "Cucumber Persian": "🥒", "Cucumber Slicer": "🥒",
-    "Delicata": "🎃", "Eggplant": "🍆", "Freight": "🚚", "Garlic": "🧄", "Ginger": "🫚",
-    "Grape Tomato": "🍅", "Grapes Early Sweet": "🍇", "Green Beans": "🫛",
-    "Green Bell Pepper": "🫑", "Green Onions": "🧅", "Green Plantain": "🍌", "Grey Squash": "🎃",
-    "Habanero": "🌶️🔥", "Heirloom": "🍅", "Heirloom Tomato": "🍅", "Honeydew": "🍈",
-    "Jalapeã±O": "🌶️", "Kabocha": "🎃", "Lemon": "🍋", "Lettuce": "🥬", "Logistic": "📦",
-    "Mango": "🥭", "Material": "📦", "Medley": "🥗", "Minisweet Pepper": "🫑",
-    "Orange Bell Pepper": "🟧🫑", "Other": "📦", "Palermo Pepper": "🌶️",
-    "Papaya": "🍈", "Pasilla": "🌶️", "Pepper Jalapeño": "🌶️", "Persian Lime": "🍈",
-    "Pickle": "🥒", "Pineapple": "🍍", "Poblano": "🌶️", "Raspberries": "🍓",
-    "Red Bell Pepper": "🟥🫑", "Red Cabbage": "🥬", "Red Onion": "🧅",
-    "Roma Tomato": "🍅", "Romaine": "🥬", "Round Tomato": "🍅", "Serrano": "🌶️",
-    "Shishito": "🌶️", "Spaghetti": "🍝", "Strawberry": "🍓", "Tariff": "💲",
-    "Thai Pepper": "🌶️🇹🇭", "Tomatillo": "🍏", "TOV (Tomato on Vine)": "🍅",
-    "Watermelon": "🍉", "White Corn": "🌽", "White Onion": "🧅",
-    "Yellow Bell Pepper": "🟨🫑", "Yellow Corn": "🌽", "Yellow Onion": "🧅",
-    "Yellow Squash": "🎃", "Zucchini": "🥒", "English Cucumber": "🥒"
-}
+    ✅ Reglas
+    - Excluir canceladas cuando se pidan órdenes efectivas:
+      AND COALESCE(invoice_payment_status, '') NOT ILIKE '%cancel%'
+    - Evitar nulos en claves de agrupación: WHERE COALESCE(campo, '') <> ''
+    - Órdenes (POs): COUNT(DISTINCT sales_order)  |  Líneas: COUNT(*)  |  Órdenes facturadas: COUNT(DISTINCT invoice_num)
+    - CV/OG: CASE WHEN organic ILIKE '%org%' THEN 'OG' ELSE 'CV' END
+    - Todo rango/fecha usa el alias date (arriba), ej: AND date BETWEEN DATE 'YYYY-MM-DD' AND DATE 'YYYY-MM-DD'
+    - Márgenes: profit_pct := SUM(total_profit_usd)/NULLIF(SUM(total_revenue),0)*100
+    - INITCAP() sólo para presentación; no para lógica.
 
-def add_emoji_to_product(p: str) -> str:
-    """Para la tabla: antepone el emoji al Product si hay match (substring insensible)."""
-    if not isinstance(p, str) or not p.strip():
-        return ""
-    for key, emoji in commodities_emojis.items():
-        if key.lower() in p.lower():
-            return f"{emoji} {p}"
-    pl = p.lower()
-    if "heirloom" in pl or "tomato" in pl: return f"🍅 {p}"
-    if "english" in pl and "cucumber" in pl: return f"🥒 {p}"
-    if "cucumber" in pl: return f"🥒 {p}"
-    if "red bell pepper" in pl: return f"🟥🫑 {p}"
-    if "yellow bell pepper" in pl: return f"🟨🫑 {p}"
-    if "orange bell pepper" in pl: return f"🟧🫑 {p}"
-    if "bell pepper" in pl: return f"🫑 {p}"
-    return p
+    Checklist antes de emitir SQL:
+    * ¿Filtraste canceladas si aplica?
+    * ¿Usaste el alias date y no una fecha cruda?
+    * ¿Evitaste nulos en agrupaciones?
+    * ¿Diferenciaste POs vs líneas con COUNT(DISTINCT)?
+    * ¿Protegiste divisiones por cero con NULLIF?
 
-def product_emoji(p: str) -> str:
-    """Para la concatenación: devuelve SOLO el emoji (sin modificar el Product)."""
-    if not isinstance(p, str) or not p.strip():
-        return ""
-    for key, emoji in commodities_emojis.items():
-        if key.lower() in p.lower():
-            return emoji
-    pl = p.lower()
-    if "heirloom" in pl or "tomato" in pl: return "🍅"
-    if "english" in pl and "cucumber" in pl: return "🥒"
-    if "cucumber" in pl: return "🥒"
-    if "red bell pepper" in pl: return "🟥🫑"
-    if "yellow bell pepper" in pl: return "🟨🫑"
-    if "orange bell pepper" in pl: return "🟧🫑"
-    if "bell pepper" in pl: return "🫑"
-    return ""
+    Formato de salida (JSON estricto):
+    {
+      "assumptions": "supuestos explícitos si el pedido es ambiguo",
+      "explanation": "breve explicación de la lógica",
+      "sql": "consulta SQL final",
+      "suggestions": "recomendaciones de índices u opciones"
+    }
 
-def _clean_concat_volume(v: str) -> str:
-    """Vacía si es 'nan', 'none', 'nan none' o blanco."""
-    s = (str(v) if v is not None else "").strip()
-    sl = s.lower()
-    if not s or sl in ("nan", "none", "nan none"):
-        return ""
-    return s
-
-def build_concat_row(row) -> str:
+    Responde SIEMPRE con JSON válido. La consulta DEBE ser un SELECT.
+    Si no hay LIMIT explícito añade `LIMIT 5000` al final.
     """
-    {OG/CV} - {emoji} {Product} {Size} {Volume} {Price$}
-    - Vendor y Where ignorados
-    - Volume opcional (limpio)
+)
+
+SCHEMA_HINT = textwrap.dedent(
     """
-    ogcv = (row.get("OG/CV") or "").strip()
-    product = (row.get("Product") or "").strip()
-    size = (row.get("Size") or "").strip()
-    vol = _clean_concat_volume(row.get("Volume"))
-    price = (row.get("Price$") or "").strip()
-    emoji = product_emoji(product)
+    Columnas frecuentes y tipos aproximados (no exhaustivo):
+      product text, commoditie text, unit text, organic text, label text, coo text,
+      sales_order text, invoice_num text, invoice_payment_status text,
+      sale_location text, sales_rep text, customer text, vendor text,
+      buyer_assigned text, lot text, lot_location text, source text, frutto text,
+      number_market numeric, buyer_product text, day text,
+      received_date date, reqs_date date, most_recent_invoice_paid_date date,
+      pack_date date, use_by_date date, created_at timestamptz,
+      quantity numeric, cost_per_unit numeric, price_per_unit numeric,
+      total_cost numeric, total_sold_lot_expenses numeric,
+      total_revenue numeric, total_profit_usd numeric, total_profit_pct numeric
+    """
+)
 
-    # Orden requerido: OG/CV → emoji → Product → Size → Volume → Price$
-    parts = [ogcv, "-"]
-    if emoji:
-        parts.append(emoji)
-    parts.append(product)
-    if size:
-        parts.append(size)
-    if vol:
-        parts.append(vol)
-    if price:
-        parts.append(price)
-    return " ".join([p for p in parts if str(p).strip() != ""])
-
-# ------------------------
-# Supabase helpers (by sections)
-# ------------------------
-def _read_section(section_name: str) -> dict:
-    try:
-        sec = st.secrets[section_name]
-    except Exception:
-        raise KeyError(f"Section '{section_name}' not found in st.secrets.")
-    for k in ("url", "anon_key"):
-        if k not in sec or not str(sec[k]).strip():
-            raise KeyError(f"Missing or empty '{k}' in st.secrets['{section_name}'].")
-    sec = dict(sec)
-    sec["table"] = sec.get("table", "").strip() or "quotations"
-    sec["schema"] = sec.get("schema", "").strip() or "public"
-    return sec
-
-def _create_client(url: str, key: str):
-    try:
-        from supabase import create_client
-    except Exception as e:
-        raise ImportError(f"'supabase' is missing in requirements.txt: {e}")
-    return create_client(url, key)
-
-def _sb_table(sb, schema: str, table: str):
-    try:
-        return sb.schema(schema).table(table)  # supabase-py v2+
-    except Exception:
-        return sb.table(table)                 # fallback v1
-
-# ------------------------
-# Data fetch (Supabase — uses section supabase_quotes)
-# ------------------------
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_quotations_from_supabase():
-    try:
-        cfg = _read_section("supabase_quotes")
-        sb = _create_client(cfg["url"], cfg["anon_key"])
-        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
-    except Exception as e:
-        st.error(f"Invalid Supabase config/client: {e}")
-        return pd.DataFrame()
-
-    frames, page_size = [], 1000
-    for i in range(1000):
-        start, end = i * page_size, i * page_size + page_size - 1
-        try:
-            resp = (
-                tbl.select(
-                    "id,cotization_date,organic,product,price,location,"
-                    "volume_num,volume_unit,volume_standard,vendorclean,"
-                    "size_text"
-                )
-                .range(start, end)
-                .execute()
+FEW_SHOT = [
+    {
+        "q": "Clientes de nuestro equipo y qué commodities consumen (sin canceladas)",
+        "a": textwrap.dedent(
+            """
+            WITH base AS (
+              SELECT
+                COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date) AS date,
+                customer,
+                commoditie,
+                sales_rep,
+                invoice_payment_status
+              FROM ventas_frutto
             )
-        except Exception as e:
-            st.error(f"Error querying Supabase: {e}")
-            return pd.DataFrame()
+            SELECT sales_rep, customer, commoditie, COUNT(*) AS lines
+            FROM base
+            WHERE COALESCE(customer,'') <> ''
+              AND COALESCE(commoditie,'') <> ''
+              AND COALESCE(invoice_payment_status, '') NOT ILIKE '%cancel%'
+            GROUP BY sales_rep, customer, commoditie
+            ORDER BY sales_rep, customer, lines DESC
+            LIMIT 5000;
+            """
+        ).strip(),
+    },
+]
 
-        rows = getattr(resp, "data", None) or []
-        if not rows:
-            break
-        frames.append(pd.DataFrame(rows))
-        if len(rows) < page_size:
-            break
+# ==========================
+# 🧠 Utilidades
+# ==========================
+ROW_LIMIT_DEFAULT = 5000
 
-    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if df.empty:
-        return df
+SQL_ONLY_SELECT = re.compile(r"^\s*SELECT\b", re.IGNORECASE | re.DOTALL)
 
-    df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
-    df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
-    df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
-    df["volume_unit"] = df["volume_unit"].astype(str).fillna("unit")
-    if "size_text" not in df.columns:
-        df["size_text"] = pd.NA
-    df = df.rename(columns={
-        "product":"Product",
-        "location":"Location",
-        "vendorclean":"VendorClean"
-    })
-    return df
 
-# ------------------------
-# UI
-# ------------------------
-st.title("Daily Sheet")
+def enforce_select_and_limit(sql: str, default_limit: int = ROW_LIMIT_DEFAULT) -> str:
+    sql_clean = sql.strip().rstrip(";")
+    if not SQL_ONLY_SELECT.search(sql_clean):
+        raise ValueError("Sólo se permiten consultas SELECT.")
+    # Añadir LIMIT si no existe (ingenuo pero útil)
+    if re.search(r"\bLIMIT\b", sql_clean, re.IGNORECASE) is None:
+        sql_clean = f"{sql_clean}\nLIMIT {default_limit}"
+    return sql_clean
 
-# Centered logo + utilities
-colA, colB, colC = st.columns([1, 2, 1])
-with colB:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, use_container_width=True)
-    else:
-        st.info("Logo not found. Check 'data/Asset 7@4x.png'.")
 
-cc1, cc2 = st.columns(2)
-with cc1:
-    if st.button("🧹 Clear data cache"):
-        st.cache_data.clear()
-        st.success("Cache cleared. Reload the page or use 'Force rerun'.")
-with cc2:
-    if st.button("🔄 Force rerun"):
-        st.rerun()
+def run_query(engine: Engine, sql: str) -> pd.DataFrame:
+    with engine.connect() as conn:
+        return pd.read_sql_query(text(sql), conn)
 
-df = fetch_all_quotations_from_supabase()
 
-if df.empty:
-    st.info("No data available from Supabase yet.")
-    st.caption("Page under construction — day view coming soon.")
-    st.stop()
+def call_llm(question: str) -> dict:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Configura OPENAI_API_KEY en secrets o entorno.")
+    llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.1, timeout=60)
 
-# Normalized date column
-df["_date"] = pd.to_datetime(df["cotization_date"], errors="coerce").dt.date
-valid_dates = df["_date"].dropna()
-if valid_dates.empty:
-    st.warning("Could not parse any date in 'cotization_date'.")
-    st.stop()
-
-# Date selector in mm/dd/yyyy
-default_date = max(valid_dates)
-sel_date = st.date_input("Date to display", value=default_date, format="MM/DD/YYYY")
-
-# Day subset
-day_df = df[df["_date"] == sel_date].copy()
-if day_df.empty:
-    st.warning("No quotations for the selected date.")
-    st.stop()
-
-# Derived fields
-day_df["Vendor"]  = day_df["VendorClean"]
-day_df["OG/CV"]   = day_df["Organic"].apply(_ogcv)
-day_df["Where"]   = day_df["Location"]
-day_df["Size"]    = day_df.apply(_choose_size, axis=1)
-day_df["Volume"]  = day_df.apply(_volume_str, axis=1)   # ← Final display name
-day_df["Price$"]  = day_df["Price"].apply(_format_price)
-day_df["Family"]  = day_df["Product"].apply(_family_from_product)
-day_df["Date"]    = pd.to_datetime(day_df["cotization_date"], errors="coerce").dt.strftime("%m/%d/%Y")
-
-# ---------- Day view filters ----------
-cols = st.columns(6)
-
-with cols[0]:
-    product_options = sorted([x for x in day_df["Product"].dropna().unique().tolist() if str(x).strip() != ""])
-    sel_products = st.multiselect("Products (available)", options=product_options, default=product_options)
-
-with cols[1]:
-    locs = sorted([x for x in day_df["Where"].dropna().unique().tolist() if str(x).strip() != ""])
-    sel_locs = st.multiselect("Locations", options=locs, default=locs)
-
-with cols[2]:
-    cat_options = ["Conventional (CV)", "Organic (OG)"]
-    sel_cat = st.multiselect(
-        "Category (OG/CV)",
-        options=cat_options,
-        default=cat_options,
-        help="Filtra por productos Convencionales u Orgánicos."
+    # Construye el prompt consolidado
+    sys = FRUTTO_RULES
+    user = (
+        "Consulta de negocio (español o inglés):\n" + question.strip() +
+        "\n\nPistas de esquema:\n" + SCHEMA_HINT +
+        "\n\nEjemplo guía (NO copiar literal, sólo estilo):\n" + FEW_SHOT[0]["a"]
     )
+    msgs = [
+        ("system", sys),
+        ("user", user),
+    ]
 
-with cols[3]:
-    fam_options = sorted([x for x in day_df["Family"].dropna().unique().tolist() if str(x).strip() != ""])
-    sel_fams = st.multiselect("Family (filter only)", options=fam_options, default=fam_options)
+    # Llamada simple (sin LC chain) para mayor control del JSON
+    from langchain_core.messages import SystemMessage, HumanMessage
+    resp = llm.invoke([SystemMessage(content=sys), HumanMessage(content=user)])
+    txt = resp.content if hasattr(resp, "content") else str(resp)
 
-with cols[4]:
-    search = st.text_input("Search product (contains)", "")
+    # Intenta parsear JSON
+    try:
+        data = json.loads(txt)
+    except Exception:
+        # Recuperación: busca el primer bloque { ... }
+        m = re.search(r"\{[\s\S]*\}$", txt.strip())
+        if not m:
+            raise ValueError(f"LLM no devolvió JSON válido:\n{txt}")
+        data = json.loads(m.group(0))
+    # Validación mínima
+    for key in ("explanation", "sql", "suggestions"):
+        if key not in data:
+            data[key] = ""
+    data["assumptions"] = data.get("assumptions", "")
+    return data
 
-with cols[5]:
-    sort_opt = st.selectbox("Sort by", ["Product", "Vendor", "Where", "Price (asc)", "Price (desc)"])
+# ==========================
+# 🧩 UI principal
+# ==========================
 
-# ---- Apply filters ----
-if sel_products:
-    day_df = day_df[day_df["Product"].isin(sel_products)]
-if sel_locs:
-    day_df = day_df[day_df["Where"].isin(sel_locs)]
+with st.sidebar:
+    st.subheader("Ajustes")
+    enforced_limit = st.number_input("LIMIT por defecto si no especifica", 100, 20000, ROW_LIMIT_DEFAULT, step=100)
+    show_sql = st.checkbox("Mostrar SQL", value=True)
+    run_auto = st.checkbox("Ejecutar automáticamente", value=True)
 
-if sel_cat:
-    allowed = set()
-    if "Conventional (CV)" in sel_cat: allowed.add("CV")
-    if "Organic (OG)" in sel_cat: allowed.add("OG")
-    if allowed:
-        day_df = day_df[day_df["OG/CV"].isin(allowed)]
+# Preguntas sugeridas
+st.markdown("**Sugerencias rápidas**")
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("Clientes por sales_rep y commodity (sin canceladas)"):
+        st.session_state["_demo_q"] = "Lista los clientes de cada sales_rep y los commodities que consumen (excluye canceladas)."
+with col2:
+    if st.button("Top 20 commodities por revenue (últimos 90 días)"):
+        st.session_state["_demo_q"] = (
+            "Top 20 commodities por SUM(total_revenue) en los últimos 90 días, "
+            "excluyendo órdenes canceladas."
+        )
+with col3:
+    if st.button("Margen por cliente y commodity (YTD)"):
+        st.session_state["_demo_q"] = (
+            "Margen % por cliente y commodity en el año en curso; ordena desc por margen %. "
+            "Excluye canceladas."
+        )
 
-if sel_fams:
-    day_df = day_df[day_df["Family"].isin(sel_fams)]
+q_default = st.session_state.get("_demo_q", "Clientes de nuestro equipo y qué commodities consumen (sin canceladas)")
+question = st.text_area("Pregunta de negocio", value=q_default, height=100)
 
-if search.strip():
-    s = search.strip().lower()
-    day_df = day_df[day_df["Product"].str.lower().str.contains(s, na=False)]
+colA, colB = st.columns([1,1])
+with colA:
+    go = st.button("🔍 Generar SQL")
+with colB:
+    clear = st.button("🧹 Limpiar")
 
-# Ordering
-if sort_opt == "Price (asc)":
-    day_df = day_df.sort_values("Price", ascending=True)
-elif sort_opt == "Price (desc)":
-    day_df = day_df.sort_values("Price", ascending=False)
-else:
-    day_df = day_df.sort_values(sort_opt)
+if clear:
+    st.session_state.pop("_out", None)
+    st.session_state.pop("_res", None)
 
-# ---------- Read-only pretty table ----------
-# 1) Copia para mostrar emojis en Product
-display_df = day_df.copy()
-display_df["Product"] = display_df["Product"].apply(add_emoji_to_product)
+if go and question.strip():
+    try:
+        out = call_llm(question)
+        st.session_state["_out"] = out
+    except Exception as e:
+        st.error(f"Error generando SQL: {e}")
 
-# 2) Columna de concatenación (emoji ANTES del producto)
-concat_series = day_df.apply(build_concat_row, axis=1)
+out = st.session_state.get("_out")
+if out:
+    if out.get("assumptions"):
+        st.info(out["assumptions"])
+    st.write(out.get("explanation", ""))
 
-# Orden de columnas personalizado + Concat al final
-ordered_cols = ["Product", "Price$", "Size", "Where", "Volume", "OG/CV", "Vendor"]
-show = display_df[ordered_cols].copy()
-show["Concat"] = concat_series.values  # última columna
+    sql_raw = out.get("sql", "").strip()
+    try:
+        sql_safe = enforce_select_and_limit(sql_raw, default_limit=int(enforced_limit))
+    except Exception as e:
+        st.error(f"SQL inválido: {e}")
+        sql_safe = ""
 
-st.dataframe(show, use_container_width=True)
+    if show_sql and sql_safe:
+        st.code(sql_safe, language="sql")
 
-# Bloque de texto para copiar rápidamente todas las líneas concatenadas
-with st.expander("📋 Copy Concat lines"):
-    st.code("\n".join(concat_series.tolist()), language="text")
+    if sql_safe and (run_auto or st.button("▶️ Ejecutar consulta")):
+        try:
+            df = run_query(get_engine(), sql_safe)
+            st.session_state["_res"] = df
+        except Exception as e:
+            st.error(f"Error al ejecutar la consulta: {e}")
 
-# CSV export con el mismo orden + Concat
-csv_bytes = show.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "⬇️ Download CSV (day view)",
-    data=csv_bytes,
-    file_name=f"daily_sheet_{sel_date.strftime('%m-%d-%Y')}.csv",
-    mime="text/csv"
-)
+    if out.get("suggestions"):
+        with st.expander("💡 Recomendaciones"):
+            st.markdown(out["suggestions"])  # puede traer bullets
 
-# =========================
-# 📊 Visualizations (BASED on the visible *data*, sin emojis)
-# =========================
-st.markdown("## 📊 Visualizations (current table)")
-
-if not ALTAIR_OK:
-    st.warning("Altair is not installed. Add `altair>=5` to requirements.txt and restart the app.")
-else:
-    viz_day = day_df.copy()
-
-    if viz_day.empty:
-        st.info("There are no rows in the current table to plot.")
+res = st.session_state.get("_res")
+if isinstance(res, pd.DataFrame):
+    st.subheader("Resultados")
+    if res.empty:
+        st.warning("La consulta no devolvió filas.")
     else:
-        viz_day["price_num"] = pd.to_numeric(viz_day["Price"], errors="coerce")
-        viz_day["volume_num"] = pd.to_numeric(viz_day["volume_num"], errors="coerce")
-        viz_day["Where_norm"] = viz_day["Where"].apply(_norm_name)
-        viz_day["Vendor_norm"] = viz_day["Vendor"].apply(_norm_name)
+        st.dataframe(res, use_container_width=True)
+        # KPIs básicos si hay columnas típicas
+        try:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Filas", f"{len(res):,}")
+            with c2:
+                if "total_revenue" in res.columns:
+                    st.metric("Revenue (sum)", f"${res['total_revenue'].sum():,.0f}")
+            with c3:
+                if "total_profit_usd" in res.columns:
+                    st.metric("Profit (sum)", f"${res['total_profit_usd'].sum():,.0f}")
+            with c4:
+                if set(["total_profit_usd", "total_revenue"]).issubset(res.columns):
+                    num = res["total_profit_usd"].sum()
+                    den = res["total_revenue"].sum()
+                    pct = (num / den * 100.0) if den else None
+                    st.metric("Margen %", f"{pct:.1f}%" if pct is not None else "—")
+        except Exception:
+            pass
 
-        # ---- KPIs ----
-        c_k1, c_k2, c_k3, c_k4 = st.columns(4)
-        with c_k1:
-            mean_price = viz_day["price_num"].mean()
-            st.metric("Average price (table)", f"{mean_price:.2f}" if pd.notna(mean_price) else "—")
-        with c_k2:
-            min_price = viz_day["price_num"].min()
-            st.metric("Min price (table)", f"{min_price:.2f}" if pd.notna(min_price) else "—")
-        with c_k3:
-            max_price = viz_day["price_num"].max()
-            st.metric("Max price (table)", f"{max_price:.2f}" if pd.notna(max_price) else "—")
-        with c_k4:
-            st.metric("Visible offers", f"{len(viz_day)}")
+        # Descargar CSV
+        csv = res.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Descargar CSV",
+            data=csv,
+            file_name="sql_agent_result.csv",
+            mime="text/csv",
+        )
 
-        # ---- Charts ----
-        g_loc = (viz_day.groupby("Where_norm", as_index=False)
-                        .agg(avg_price=("price_num","mean"),
-                             offers=("Where_norm","count")))
-        if not g_loc.empty:
-            chart_loc = alt.Chart(g_loc).mark_bar().encode(
-                x=alt.X("avg_price:Q", title="Average price"),
-                y=alt.Y("Where_norm:N", sort="-x", title="Location"),
-                tooltip=["Where_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Average price by location (visible table)", height=320)
-            st.altair_chart(chart_loc, use_container_width=True)
-
-        g_vendor = (viz_day.groupby("Vendor_norm", as_index=False)
-                         .agg(avg_price=("price_num","mean"),
-                              offers=("Vendor_norm","count")))
-        if not g_vendor.empty:
-            chart_vendor = alt.Chart(g_vendor).mark_bar().encode(
-                x=alt.X("avg_price:Q", title="Average price"),
-                y=alt.Y("Vendor_norm:N", sort="-x", title="Vendor"),
-                tooltip=["Vendor_norm:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Average price by vendor (visible table)", height=350)
-            st.altair_chart(chart_vendor, use_container_width=True)
-
-        g_vol = (viz_day.groupby("Vendor_norm", as_index=False)
-                        .agg(total_volume=("volume_num","sum")))
-        g_vol = g_vol[g_vol["total_volume"].fillna(0) > 0]
-        if not g_vol.empty:
-            chart_vol = alt.Chart(g_vol).mark_bar().encode(
-                x=alt.X("total_volume:Q", title="Total volume"),
-                y=alt.Y("Vendor_norm:N", sort="-x", title="Vendor"),
-                tooltip=["Vendor_norm:N", alt.Tooltip("total_volume:Q", format=",.0f")]
-            ).properties(title="Volume by vendor (visible table)", height=350)
-            st.altair_chart(chart_vol, use_container_width=True)
-
-        g_prod = (viz_day.groupby("Product", as_index=False)
-                          .agg(avg_price=("price_num","mean"),
-                               offers=("Product","count")))
-        if not g_prod.empty and g_prod["Product"].nunique() > 1:
-            chart_prod = alt.Chart(g_prod).mark_bar().encode(
-                x=alt.X("avg_price:Q", title="Average price"),
-                y=alt.Y("Product:N", sort="-x", title="Product"),
-                tooltip=["Product:N", alt.Tooltip("avg_price:Q", format=".2f"), "offers:Q"]
-            ).properties(title="Average price by product (visible table)", height=350)
-            st.altair_chart(chart_prod, use_container_width=True)
-
-        if viz_day["volume_num"].fillna(0).sum() > 0:
-            scatter = alt.Chart(viz_day.dropna(subset=["price_num","volume_num"])).mark_circle(size=80).encode(
-                x=alt.X("price_num:Q", title="Price"),
-                y=alt.Y("volume_num:Q", title="Volume"),
-                tooltip=["Product","Vendor_norm","Where_norm",
-                         alt.Tooltip("price_num:Q", format=".2f"),
-                         alt.Tooltip("volume_num:Q", format=",.0f")]
-            ).properties(title="Price vs Volume (visible table)", height=320)
-            st.altair_chart(scatter, use_container_width=True)
+# ==========================
+# 🧪 Nota de seguridad de ejecución
+# ==========================
+st.caption(
+    "Solo se ejecutan SELECT y se aplica LIMIT por defecto. Si la query no trae LIMIT, se añade automáticamente."
+)
