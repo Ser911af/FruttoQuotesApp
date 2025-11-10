@@ -1,5 +1,5 @@
 # pages/02_SQL_Agent.py
-# Streamlit page: Natural language → SQL (ventas_frutto)
+# Streamlit page: Natural language → SQL (ventas_frutto) con DeepSeek API
 # - Enforces Frutto Foods SQL rules provided by Sergio
 # - Produces: breve explicación, SQL final (```sql```), y sugerencias de índices/alternativas
 # - Ejecuta sólo SELECT, con LIMIT seguro, y muestra resultados + métricas
@@ -13,26 +13,22 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-# === LLM (LangChain) ===
-try:
-    from langchain_openai import ChatOpenAI
-except Exception:
-    ChatOpenAI = None
+# === LLM (DeepSeek API wrapper) ===
+import requests
 
 # ==========================
 # ⚙️ Configuración
 # ==========================
-st.set_page_config(page_title="SQL Agent — ventas_frutto", layout="wide")
+st.set_page_config(page_title="SQL Agent — ventas_frutto (DeepSeek)", layout="wide")
 
-st.title("🔎 Analista SQL — ventas_frutto")
+st.title("🧠 Analista SQL — ventas_frutto (DeepSeek)")
 st.caption("Consulta tu tabla con lenguaje natural, con reglas de Frutto Foods.")
 
-# OpenAI key (o Azure OpenAI): usar st.secrets para producción
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")
+# DeepSeek API key (debe estar en secrets o entorno)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or st.secrets.get("DEEPSEEK_API_KEY", "")
 
-if ChatOpenAI is None:
-    st.error("Falta langchain-openai. Agrega `langchain-openai>=0.2` en requirements.txt")
+if not DEEPSEEK_API_KEY:
+    st.error("⚠️ Falta DEEPSEEK_API_KEY en secrets o entorno.")
 
 # DB URL — ejemplo: postgresql+psycopg2://user:pass@host:5432/dbname
 DB_URL = (
@@ -148,66 +144,49 @@ FEW_SHOT = [
     },
 ]
 
-# ==========================
-# 🧠 Utilidades
-# ==========================
 ROW_LIMIT_DEFAULT = 5000
-
 SQL_ONLY_SELECT = re.compile(r"^\s*SELECT\b", re.IGNORECASE | re.DOTALL)
-
 
 def enforce_select_and_limit(sql: str, default_limit: int = ROW_LIMIT_DEFAULT) -> str:
     sql_clean = sql.strip().rstrip(";")
     if not SQL_ONLY_SELECT.search(sql_clean):
         raise ValueError("Sólo se permiten consultas SELECT.")
-    # Añadir LIMIT si no existe (ingenuo pero útil)
     if re.search(r"\bLIMIT\b", sql_clean, re.IGNORECASE) is None:
         sql_clean = f"{sql_clean}\nLIMIT {default_limit}"
     return sql_clean
-
 
 def run_query(engine: Engine, sql: str) -> pd.DataFrame:
     with engine.connect() as conn:
         return pd.read_sql_query(text(sql), conn)
 
-
-def call_llm(question: str) -> dict:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("Configura OPENAI_API_KEY en secrets o entorno.")
-    llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.1, timeout=60)
-
-    # Construye el prompt consolidado
-    sys = FRUTTO_RULES
-    user = (
-        "Consulta de negocio (español o inglés):\n" + question.strip() +
-        "\n\nPistas de esquema:\n" + SCHEMA_HINT +
-        "\n\nEjemplo guía (NO copiar literal, sólo estilo):\n" + FEW_SHOT[0]["a"]
-    )
-    msgs = [
-        ("system", sys),
-        ("user", user),
-    ]
-
-    # Llamada simple (sin LC chain) para mayor control del JSON
-    from langchain_core.messages import SystemMessage, HumanMessage
-    resp = llm.invoke([SystemMessage(content=sys), HumanMessage(content=user)])
-    txt = resp.content if hasattr(resp, "content") else str(resp)
-
-    # Intenta parsear JSON
+def call_deepseek(question: str) -> dict:
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "system", "content": FRUTTO_RULES},
+            {
+                "role": "user",
+                "content": f"Consulta de negocio: {question}\n\nPistas de esquema:\n{SCHEMA_HINT}\n\nEjemplo:\n{FEW_SHOT[0]['a']}"
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 1000,
+    }
+    url = "https://api.deepseek.com/v1/chat/completions"
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    data = resp.json()
+    txt = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
     try:
-        data = json.loads(txt)
+        parsed = json.loads(txt)
     except Exception:
-        # Recuperación: busca el primer bloque { ... }
         m = re.search(r"\{[\s\S]*\}$", txt.strip())
         if not m:
-            raise ValueError(f"LLM no devolvió JSON válido:\n{txt}")
-        data = json.loads(m.group(0))
-    # Validación mínima
-    for key in ("explanation", "sql", "suggestions"):
-        if key not in data:
-            data[key] = ""
-    data["assumptions"] = data.get("assumptions", "")
-    return data
+            raise ValueError(f"DeepSeek no devolvió JSON válido:\n{txt}")
+        parsed = json.loads(m.group(0))
+    for k in ("assumptions", "explanation", "sql", "suggestions"):
+        parsed.setdefault(k, "")
+    return parsed
 
 # ==========================
 # 🧩 UI principal
@@ -219,7 +198,6 @@ with st.sidebar:
     show_sql = st.checkbox("Mostrar SQL", value=True)
     run_auto = st.checkbox("Ejecutar automáticamente", value=True)
 
-# Preguntas sugeridas
 st.markdown("**Sugerencias rápidas**")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -227,16 +205,10 @@ with col1:
         st.session_state["_demo_q"] = "Lista los clientes de cada sales_rep y los commodities que consumen (excluye canceladas)."
 with col2:
     if st.button("Top 20 commodities por revenue (últimos 90 días)"):
-        st.session_state["_demo_q"] = (
-            "Top 20 commodities por SUM(total_revenue) en los últimos 90 días, "
-            "excluyendo órdenes canceladas."
-        )
+        st.session_state["_demo_q"] = "Top 20 commodities por SUM(total_revenue) en los últimos 90 días, excluyendo canceladas."
 with col3:
     if st.button("Margen por cliente y commodity (YTD)"):
-        st.session_state["_demo_q"] = (
-            "Margen % por cliente y commodity en el año en curso; ordena desc por margen %. "
-            "Excluye canceladas."
-        )
+        st.session_state["_demo_q"] = "Margen % por cliente y commodity en el año en curso; excluye canceladas."
 
 q_default = st.session_state.get("_demo_q", "Clientes de nuestro equipo y qué commodities consumen (sin canceladas)")
 question = st.text_area("Pregunta de negocio", value=q_default, height=100)
@@ -253,7 +225,7 @@ if clear:
 
 if go and question.strip():
     try:
-        out = call_llm(question)
+        out = call_deepseek(question)
         st.session_state["_out"] = out
     except Exception as e:
         st.error(f"Error generando SQL: {e}")
@@ -283,7 +255,7 @@ if out:
 
     if out.get("suggestions"):
         with st.expander("💡 Recomendaciones"):
-            st.markdown(out["suggestions"])  # puede traer bullets
+            st.markdown(out["suggestions"])
 
 res = st.session_state.get("_res")
 if isinstance(res, pd.DataFrame):
@@ -292,7 +264,6 @@ if isinstance(res, pd.DataFrame):
         st.warning("La consulta no devolvió filas.")
     else:
         st.dataframe(res, use_container_width=True)
-        # KPIs básicos si hay columnas típicas
         try:
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -312,7 +283,6 @@ if isinstance(res, pd.DataFrame):
         except Exception:
             pass
 
-        # Descargar CSV
         csv = res.to_csv(index=False).encode("utf-8")
         st.download_button(
             "⬇️ Descargar CSV",
@@ -321,9 +291,4 @@ if isinstance(res, pd.DataFrame):
             mime="text/csv",
         )
 
-# ==========================
-# 🧪 Nota de seguridad de ejecución
-# ==========================
-st.caption(
-    "Solo se ejecutan SELECT y se aplica LIMIT por defecto. Si la query no trae LIMIT, se añade automáticamente."
-)
+st.caption("Solo se ejecutan SELECT y se aplica LIMIT por defecto. Se usa DeepSeek como LLM.")
