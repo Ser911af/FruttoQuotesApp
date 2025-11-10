@@ -128,13 +128,15 @@ FEW_SHOT = [
                 customer,
                 commoditie,
                 sales_rep,
+                sales_order,
                 invoice_payment_status
               FROM ventas_frutto
             )
-            SELECT sales_rep, customer, commoditie, COUNT(*) AS lines
+            SELECT sales_rep, customer, commoditie, COUNT(*) AS lines, COUNT(DISTINCT sales_order) AS pos
             FROM base
             WHERE COALESCE(customer,'') <> ''
               AND COALESCE(commoditie,'') <> ''
+              AND COALESCE(sales_rep,'') <> ''
               AND COALESCE(invoice_payment_status, '') NOT ILIKE '%cancel%'
             GROUP BY sales_rep, customer, commoditie
             ORDER BY sales_rep, customer, lines DESC
@@ -167,23 +169,44 @@ def call_deepseek(question: str) -> dict:
             {"role": "system", "content": FRUTTO_RULES},
             {
                 "role": "user",
-                "content": f"Consulta de negocio: {question}\n\nPistas de esquema:\n{SCHEMA_HINT}\n\nEjemplo:\n{FEW_SHOT[0]['a']}"
+                "content": f"Consulta de negocio: {question}
+
+Pistas de esquema:
+{SCHEMA_HINT}
+
+Ejemplo:
+{FEW_SHOT[0]['a']}"
             }
         ],
         "temperature": 0.1,
-        "max_tokens": 1000,
+        "max_tokens": 1200,
     }
     url = "https://api.deepseek.com/v1/chat/completions"
     resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp.raise_for_status()
     data = resp.json()
     txt = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+
+    # --- Normalización para JSON robusto ---
+    s = txt.strip()
+    # 1) Remueve fences ```json ... ``` o ``` ... ``` si vienen
+    if s.startswith("```"):
+        s = re.sub(r"^```(?:json)?\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    # 2) Si contiene texto extra, intenta extraer el primer bloque JSON balanceado
+    if True:
+        first_brace = s.find('{')
+        last_brace = s.rfind('}')
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            s = s[first_brace:last_brace+1]
+
     try:
-        parsed = json.loads(txt)
+        parsed = json.loads(s)
     except Exception:
-        m = re.search(r"\{[\s\S]*\}$", txt.strip())
-        if not m:
-            raise ValueError(f"DeepSeek no devolvió JSON válido:\n{txt}")
-        parsed = json.loads(m.group(0))
+        # Intento adicional: quita BOM/bytes raros y vuelve a intentar
+        s2 = s.encode('utf-8', 'ignore').decode('utf-8', 'ignore')
+        parsed = json.loads(s2)
+
     for k in ("assumptions", "explanation", "sql", "suggestions"):
         parsed.setdefault(k, "")
     return parsed
