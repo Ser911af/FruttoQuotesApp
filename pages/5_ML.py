@@ -1,8 +1,5 @@
 # pages/02_SQL_Agent.py
-# Streamlit page: Natural language → SQL (ventas_frutto) con DeepSeek API
-# - Enforces Frutto Foods SQL rules provided by Sergio
-# - Produces: breve explicación, SQL final (```sql```), y sugerencias de índices/alternativas
-# - Ejecuta sólo SELECT, con LIMIT seguro, y muestra resultados + métricas
+# Streamlit page: Natural language → SQL (ventas_frutto) con DeepSeek API (versión robusta sin f-strings en prompts)
 
 import os
 import json
@@ -12,25 +9,17 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-
-# === LLM (DeepSeek API wrapper) ===
 import requests
 
-# ==========================
-# ⚙️ Configuración
-# ==========================
 st.set_page_config(page_title="SQL Agent — ventas_frutto (DeepSeek)", layout="wide")
 
 st.title("🧠 Analista SQL — ventas_frutto (DeepSeek)")
 st.caption("Consulta tu tabla con lenguaje natural, con reglas de Frutto Foods.")
 
-# DeepSeek API key (debe estar en secrets o entorno)
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or st.secrets.get("DEEPSEEK_API_KEY", "")
-
 if not DEEPSEEK_API_KEY:
     st.error("⚠️ Falta DEEPSEEK_API_KEY en secrets o entorno.")
 
-# DB URL — ejemplo: postgresql+psycopg2://user:pass@host:5432/dbname
 DB_URL = (
     os.getenv("DATABASE_URL")
     or st.secrets.get("DATABASE_URL")
@@ -45,75 +34,19 @@ def get_engine() -> Engine:
     eng = create_engine(DB_URL, pool_pre_ping=True)
     return eng
 
-# ==========================
-# 📐 Reglas + Esquema
-# ==========================
 FRUTTO_RULES = textwrap.dedent(
     r"""
     Rol: Eres un analista de datos senior de Frutto Foods especializado en PostgreSQL.
     Tarea: traducir preguntas de negocio a consultas SQL correctas y eficientes contra la tabla ventas_frutto.
-
-    📦 Esquema (tabla única)
-    Tabla: ventas_frutto
-
-    Dimensiones (text/numeric):
-      product, commoditie, unit, organic, label, coo, sales_order, invoice_num,
-      invoice_payment_status, sale_location, sales_rep, customer, vendor, buyer_assigned,
-      lot, lot_location, source, frutto, number_market, buyer_product, day
-
-    Fechas (usar en este orden para la fecha de la venta):
-      received_date (date) → si es NULL usa reqs_date → most_recent_invoice_paid_date → created_at::date
-
-    Métricas (numeric):
-      quantity, cost_per_unit, price_per_unit, total_cost, total_sold_lot_expenses,
-      total_revenue, total_profit_usd, total_profit_pct
-
-    Fecha de referencia (alias obligatorio cuando haya filtros o agrupaciones por día):
-      date := COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date)
-
-    ✅ Reglas
-    - Excluir canceladas cuando se pidan órdenes efectivas:
-      AND COALESCE(invoice_payment_status, '') NOT ILIKE '%cancel%'
-    - Evitar nulos en claves de agrupación: WHERE COALESCE(campo, '') <> ''
-    - Órdenes (POs): COUNT(DISTINCT sales_order)  |  Líneas: COUNT(*)  |  Órdenes facturadas: COUNT(DISTINCT invoice_num)
-    - CV/OG: CASE WHEN organic ILIKE '%org%' THEN 'OG' ELSE 'CV' END
-    - Todo rango/fecha usa el alias date (arriba), ej: AND date BETWEEN DATE 'YYYY-MM-DD' AND DATE 'YYYY-MM-DD'
-    - Márgenes: profit_pct := SUM(total_profit_usd)/NULLIF(SUM(total_revenue),0)*100
-    - INITCAP() sólo para presentación; no para lógica.
-
-    Checklist antes de emitir SQL:
-    * ¿Filtraste canceladas si aplica?
-    * ¿Usaste el alias date y no una fecha cruda?
-    * ¿Evitaste nulos en agrupaciones?
-    * ¿Diferenciaste POs vs líneas con COUNT(DISTINCT)?
-    * ¿Protegiste divisiones por cero con NULLIF?
-
-    Formato de salida (JSON estricto):
-    {
-      "assumptions": "supuestos explícitos si el pedido es ambiguo",
-      "explanation": "breve explicación de la lógica",
-      "sql": "consulta SQL final",
-      "suggestions": "recomendaciones de índices u opciones"
-    }
-
-    Responde SIEMPRE con JSON válido. La consulta DEBE ser un SELECT.
-    Si no hay LIMIT explícito añade `LIMIT 5000` al final.
+    Usa date := COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date) y excluye canceladas.
+    Formato de salida JSON estricto con campos: assumptions, explanation, sql, suggestions.
     """
 )
 
 SCHEMA_HINT = textwrap.dedent(
     """
-    Columnas frecuentes y tipos aproximados (no exhaustivo):
-      product text, commoditie text, unit text, organic text, label text, coo text,
-      sales_order text, invoice_num text, invoice_payment_status text,
-      sale_location text, sales_rep text, customer text, vendor text,
-      buyer_assigned text, lot text, lot_location text, source text, frutto text,
-      number_market numeric, buyer_product text, day text,
-      received_date date, reqs_date date, most_recent_invoice_paid_date date,
-      pack_date date, use_by_date date, created_at timestamptz,
-      quantity numeric, cost_per_unit numeric, price_per_unit numeric,
-      total_cost numeric, total_sold_lot_expenses numeric,
-      total_revenue numeric, total_profit_usd numeric, total_profit_pct numeric
+    Columnas frecuentes: product, commoditie, sales_order, invoice_num, invoice_payment_status, sale_location, sales_rep,
+    customer, vendor, quantity, total_revenue, total_profit_usd, total_profit_pct, received_date, reqs_date, created_at.
     """
 )
 
@@ -125,25 +58,21 @@ FEW_SHOT = [
             WITH base AS (
               SELECT
                 COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date) AS date,
-                customer,
-                commoditie,
-                sales_rep,
-                sales_order,
-                invoice_payment_status
+                customer, commoditie, sales_rep, sales_order, invoice_payment_status
               FROM ventas_frutto
             )
-            SELECT sales_rep, customer, commoditie, COUNT(*) AS lines, COUNT(DISTINCT sales_order) AS pos
+            SELECT sales_rep, customer, commoditie, COUNT(*) AS lineas_venta, COUNT(DISTINCT sales_order) AS ordenes_unicas
             FROM base
-            WHERE COALESCE(customer,'') <> ''
-              AND COALESCE(commoditie,'') <> ''
-              AND COALESCE(sales_rep,'') <> ''
+            WHERE COALESCE(sales_rep, '') <> ''
+              AND COALESCE(customer, '') <> ''
+              AND COALESCE(commoditie, '') <> ''
               AND COALESCE(invoice_payment_status, '') NOT ILIKE '%cancel%'
             GROUP BY sales_rep, customer, commoditie
-            ORDER BY sales_rep, customer, lines DESC
+            ORDER BY sales_rep, customer, lineas_venta DESC
             LIMIT 5000;
             """
         ).strip(),
-    },
+    }
 ]
 
 ROW_LIMIT_DEFAULT = 5000
@@ -163,20 +92,14 @@ def run_query(engine: Engine, sql: str) -> pd.DataFrame:
 
 def call_deepseek(question: str) -> dict:
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    user_prompt = "Consulta de negocio: {}\n\nPistas de esquema:\n{}\n\nEjemplo:\n{}".format(
+        question.strip(), SCHEMA_HINT, FEW_SHOT[0]["a"]
+    )
     payload = {
         "model": "deepseek-chat",
         "messages": [
             {"role": "system", "content": FRUTTO_RULES},
-            {
-                "role": "user",
-                "content": f"Consulta de negocio: {question}
-
-Pistas de esquema:
-{SCHEMA_HINT}
-
-Ejemplo:
-{FEW_SHOT[0]['a']}"
-            }
+            {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.1,
         "max_tokens": 1200,
@@ -187,61 +110,49 @@ Ejemplo:
     data = resp.json()
     txt = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
 
-    # --- Normalización para JSON robusto ---
     s = txt.strip()
-    # 1) Remueve fences ```json ... ``` o ``` ... ``` si vienen
     if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = re.sub(r"\s*```$", "", s)
-    # 2) Si contiene texto extra, intenta extraer el primer bloque JSON balanceado
-    if True:
-        first_brace = s.find('{')
-        last_brace = s.rfind('}')
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            s = s[first_brace:last_brace+1]
+        s = re.sub(r"^```(?:json)?\\s*", "", s)
+        s = re.sub(r"\\s*```$", "", s)
+    first_brace, last_brace = s.find('{'), s.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        s = s[first_brace:last_brace+1]
 
     try:
         parsed = json.loads(s)
     except Exception:
-        # Intento adicional: quita BOM/bytes raros y vuelve a intentar
-        s2 = s.encode('utf-8', 'ignore').decode('utf-8', 'ignore')
-        parsed = json.loads(s2)
+        parsed = json.loads(s.encode('utf-8', 'ignore').decode('utf-8', 'ignore'))
 
     for k in ("assumptions", "explanation", "sql", "suggestions"):
         parsed.setdefault(k, "")
     return parsed
 
-# ==========================
-# 🧩 UI principal
-# ==========================
-
+# === UI ===
 with st.sidebar:
     st.subheader("Ajustes")
-    enforced_limit = st.number_input("LIMIT por defecto si no especifica", 100, 20000, ROW_LIMIT_DEFAULT, step=100)
+    enforced_limit = st.number_input("LIMIT por defecto", 100, 20000, ROW_LIMIT_DEFAULT, step=100)
     show_sql = st.checkbox("Mostrar SQL", value=True)
     run_auto = st.checkbox("Ejecutar automáticamente", value=True)
 
 st.markdown("**Sugerencias rápidas**")
 col1, col2, col3 = st.columns(3)
 with col1:
-    if st.button("Clientes por sales_rep y commodity (sin canceladas)"):
+    if st.button("Clientes por sales_rep y commodity"):
         st.session_state["_demo_q"] = "Lista los clientes de cada sales_rep y los commodities que consumen (excluye canceladas)."
 with col2:
-    if st.button("Top 20 commodities por revenue (últimos 90 días)"):
-        st.session_state["_demo_q"] = "Top 20 commodities por SUM(total_revenue) en los últimos 90 días, excluyendo canceladas."
+    if st.button("Top 20 commodities por revenue (90 días)"):
+        st.session_state["_demo_q"] = "Top 20 commodities por revenue últimos 90 días, sin canceladas."
 with col3:
-    if st.button("Margen por cliente y commodity (YTD)"):
-        st.session_state["_demo_q"] = "Margen % por cliente y commodity en el año en curso; excluye canceladas."
+    if st.button("Margen por cliente (YTD)"):
+        st.session_state["_demo_q"] = "Margen % por cliente y commodity año actual, sin canceladas."
 
 q_default = st.session_state.get("_demo_q", "Clientes de nuestro equipo y qué commodities consumen (sin canceladas)")
 question = st.text_area("Pregunta de negocio", value=q_default, height=100)
-
-colA, colB = st.columns([1,1])
+colA, colB = st.columns(2)
 with colA:
     go = st.button("🔍 Generar SQL")
 with colB:
     clear = st.button("🧹 Limpiar")
-
 if clear:
     st.session_state.pop("_out", None)
     st.session_state.pop("_res", None)
@@ -305,13 +216,7 @@ if isinstance(res, pd.DataFrame):
                     st.metric("Margen %", f"{pct:.1f}%" if pct is not None else "—")
         except Exception:
             pass
-
         csv = res.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Descargar CSV",
-            data=csv,
-            file_name="sql_agent_result.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Descargar CSV", data=csv, file_name="sql_agent_result.csv", mime="text/csv")
 
-st.caption("Solo se ejecutan SELECT y se aplica LIMIT por defecto. Se usa DeepSeek como LLM.")
+st.caption("Solo se ejecutan SELECT y se aplica LIMIT por defecto. DeepSeek produce JSON robusto.")
