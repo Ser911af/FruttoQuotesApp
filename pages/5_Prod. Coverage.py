@@ -147,13 +147,11 @@ def load_sales() -> pd.DataFrame:
 
     # Organic boolean (column or inferred from text)
     def infer_organic(row):
-        # explicit column first
         v = str(row.get("is_organic", "")).strip().lower()
         if v in {"true", "t", "1", "yes", "y", "si", "sí"}:
             return True
         if v in {"false", "f", "0", "no", "n"}:
             return False
-        # infer from product / commodity text
         txt = " ".join([
             str(row.get("product", "")),
             str(row.get("commodity", ""))
@@ -177,7 +175,7 @@ with st.sidebar:
     date_range = st.date_input("Date range", value=(default_start, default_end))
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date = pd.Timestamp(date_range[0])
-        end_date = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)  # end exclusive
+        end_date = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
     else:
         start_date, end_date = default_start, default_end + pd.Timedelta(days=1)
 
@@ -193,8 +191,8 @@ sdf_f = sdf[mask].copy()
 
 # Dropdowns based on filtered window
 with st.sidebar:
-    comm_opts = [""] + sorted(sdf_f["commodity_disp"].dropna().unique().tolist())
-    commodity_sel = st.selectbox("Commodity", options=comm_opts, index=0, placeholder="Select...")
+    comm_opts = ["All"] + sorted(sdf_f["commodity_disp"].dropna().unique().tolist())
+    commodity_sel = st.selectbox("Commodity", options=comm_opts, index=0)
 
     org_opts = ["All", "Organic", "Conventional"]
     org_sel = st.selectbox("Organic?", options=org_opts, index=0)
@@ -203,7 +201,7 @@ with st.sidebar:
     loc_sel = st.selectbox("Location", options=loc_opts, index=0, placeholder="Select...")
 
 # Apply filters
-if commodity_sel:
+if commodity_sel != "All":
     cm_norm = _normalize_txt(commodity_sel)
     sdf_f = sdf_f[sdf_f["commodity_c"] == cm_norm]
 
@@ -224,7 +222,6 @@ if sdf_f.empty:
 # ------------------------
 # VENDOR LIST + SELECTION
 # ------------------------
-# Summary per vendor (count invoices)
 if sdf_f["order_id"].notna().any():
     vend_summary = sdf_f.groupby("vendor_c").agg(
         Vendor=("vendor_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
@@ -234,7 +231,7 @@ if sdf_f["order_id"].notna().any():
 else:
     vend_summary = sdf_f.groupby("vendor_c").agg(
         Vendor=("vendor_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
-        Invoices=("product_c", "count"),  # row proxy
+        Invoices=("product_c", "count"),
         Products=("product_c", "nunique"),
     ).reset_index(drop=True).sort_values("Invoices", ascending=False)
 
@@ -276,7 +273,7 @@ else:
     prod_pvt = (
         vslice.groupby("product_c").agg(
             Product=("product_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
-            Invoices=("product_c", "count"),  # row proxy
+            Invoices=("product_c", "count"),
             Units=("quantity", "sum"),
             Revenue=("total_revenue", "sum"),
         ).reset_index(drop=True)
@@ -290,7 +287,6 @@ st.dataframe(
     hide_index=True,
 )
 
-# Optional chart to resemble the visual intent (top by invoices)
 if ALTAIR_OK and len(prod_pvt) > 0:
     chart = alt.Chart(prod_pvt.head(25)).mark_bar().encode(
         x=alt.X("Invoices:Q", title="Count of Invoice #"),
