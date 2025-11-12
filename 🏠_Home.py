@@ -86,16 +86,4 @@ for i, (path, label) in enumerate(links):
     with (left if i % 2 == 0 else right):
         safe_page_link(path, label)
 
-# ----------------------------
-# Hardening tips (optional)
-# ----------------------------
-with st.expander("💡 Tips to avoid navigation errors"):
-    st.markdown(
-        """
-- Run the app from the **project root** where `🏠_Home.py` lives:  
-  `streamlit run "🏠_Home.py"` (or `Home.py` if you prefer to remove the emoji).
-- Make sure all files are inside the **`pages/`** folder and the names match 100% (case, spaces, punctuation).
-- Avoid special characters in filenames, especially on Streamlit Cloud.
-- If you rename `5_Prod. Coverage.py` → `5_Prod_Coverage.py`, update the link above accordingly.
-        """
-    )
+ 
