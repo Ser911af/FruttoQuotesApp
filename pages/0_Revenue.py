@@ -269,22 +269,38 @@ if view_mode == "Annual (by Month)":
     with s4:
         st.metric("Revenue  {0}".format(prev_year), value=_abbr(prv_k[2]))
 
-    # Build dataset for chart
-    cur_m["Year"] = str(this_year)
-    prv_m["Year"] = str(prev_year)
+    # Build dataset for chart (side-by-side bars with labels)
+    cur_m["Year"], prv_m["Year"] = str(this_year), str(prev_year)
     allm = pd.concat([cur_m, prv_m], ignore_index=True)
+    month_names = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ]
     allm["Month"] = allm["month"].map({i: n for i, n in enumerate(month_names, start=1)})
 
     if ALTAIR_OK:
         mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()
-        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
-        base = alt.Chart(allm).mark_bar().encode(
+        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4], color="#000").encode(y="y:Q")
+
+        base = alt.Chart(allm).transform_calculate(
+            xoff="datum.Year === '"+str(this_year)+"' ? -0.15 : 0.15"
+        ).mark_bar().encode(
             x=alt.X("Month:N", sort=list(month_names)),
+            xOffset=alt.XOffset("Year:N"),
             y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
-            color=alt.Color("Year:N", scale=alt.Scale(scheme="category10")),
-            tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format=",.0f")],
+            color=alt.Color("Year:N", scale=alt.Scale(domain=[str(prev_year), str(this_year)], range=["#1f77b4", "#ff7f0e"])),
+            tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format="$,.0f")],
         ).properties(height=440)
-        st.altair_chart(base + rule, use_container_width=True)
+
+        labels = alt.Chart(allm).mark_text(dy=-6, size=11).encode(
+            x=alt.X("Month:N", sort=list(month_names)),
+            xOffset=alt.XOffset("Year:N"),
+            y=alt.Y("revenue:Q"),
+            detail="Year:N",
+            text=alt.Text("revenue:Q", format="$,.2s"),
+            color=alt.value("black")
+        )
+        st.altair_chart(base + labels + rule, use_container_width=True)
 
     # Detail table
     st.subheader("Monthly totals")
@@ -334,21 +350,31 @@ else:
     with s4:
         st.metric(f"Revenue {month_map[month_sel]} {prev_year}", value=_abbr(prv_k[2]))
 
-    # Build dataset for chart
-    cur_d["Year"] = str(this_year)
-    prv_d["Year"] = str(prev_year)
+    # Build dataset for chart (side-by-side bars with labels)
+    cur_d["Year"], prv_d["Year"] = str(this_year), str(prev_year)
     alld = pd.concat([cur_d, prv_d], ignore_index=True)
 
     if ALTAIR_OK:
         mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()
-        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
+        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4], color="#000").encode(y="y:Q")
+
         base = alt.Chart(alld).mark_bar().encode(
             x=alt.X("day:O", title="Day"),
+            xOffset=alt.XOffset("Year:N"),
             y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
-            color=alt.Color("Year:N", scale=alt.Scale(scheme="category10")),
-            tooltip=["Year", "day", alt.Tooltip("revenue:Q", title="Revenue", format=",.0f")],
+            color=alt.Color("Year:N", scale=alt.Scale(domain=[str(prev_year), str(this_year)], range=["#1f77b4", "#ff7f0e"])),
+            tooltip=["Year", "day", alt.Tooltip("revenue:Q", title="Revenue", format="$,.0f")],
         ).properties(height=440)
-        st.altair_chart(base + rule, use_container_width=True)
+
+        labels = alt.Chart(alld).mark_text(dy=-6, size=11).encode(
+            x=alt.X("day:O", title="Day"),
+            xOffset=alt.XOffset("Year:N"),
+            y=alt.Y("revenue:Q"),
+            detail="Year:N",
+            text=alt.Text("revenue:Q", format="$,.2s"),
+            color=alt.value("black")
+        )
+        st.altair_chart(base + labels + rule, use_container_width=True)
 
     # Detail table
     st.subheader("Daily totals")
