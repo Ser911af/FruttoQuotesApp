@@ -25,6 +25,6 @@ else:
 
 st.divider()
 st.subheader("Páginas")
-st.page_link("pages/0_Explorer.py", label="🔎 Explorer")
+st.page_link("pages/0_Revenue.py", label="🔎 Explorer")
 st.page_link("pages/1_Daily_Sheet.py", label="📊 Daily Sheet")
 st.page_link("pages/2_Upload_Quotes.py", label="📤 Upload Quotes")
