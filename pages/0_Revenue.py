@@ -1,4 +1,4 @@
-# revenue_yoy_by_month_and_day.py
+# revenue_yoy_by_month_and_day.py 
 # Streamlit page: Revenue YoY — by Month and by Day (uses ONLY reqs_date)
 # - Bars: side-by-side (this year vs last year)
 # - Labels: $ compact ($4.0k, $1.2M)
@@ -54,18 +54,49 @@ def _normalize_txt(s: Optional[str]) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
+def _canonical_po_series(s: pd.Series) -> pd.Series:
+    """
+    Normaliza los PO en `source` para poder contar únicos.
+    - Acepta variantes como 'PO #4926', 'po4926', 'Po   #  4926'
+    - Devuelve 'po-<id>' si detecta patrón, sino el texto limpio.
+    """
+    def canon(x):
+        if pd.isna(x):
+            return np.nan
+        t = _normalize_txt(x)
+        # extrae lo que sigue a 'po' (números/letras/guiones)
+        m = re.search(r"\bpo\s*#?\s*([a-z0-9\-]+)", t)
+        if m:
+            return f"po-{m.group(1)}"
+        return t if t else np.nan
+    return s.apply(canon)
+
 def _abbr(n: float) -> str:
+    """
+    Formato corto para KPIs:
+    - 678987 => $679k
+    - 1_554_800 => $1.6M
+    - 3_100_000_000 => $3B
+    Reglas:
+      - 'k' sin decimales (compacto)
+      - 'M' y 'B' con 1 decimal, quitando .0 si aplica
+    """
     if n is None or (isinstance(n, float) and np.isnan(n)):
         return "$0"
     n = float(n)
     sign = "-" if n < 0 else ""
     n = abs(n)
+
+    def trim_decimal(x: float, digits: int = 1) -> str:
+        s = f"{x:.{digits}f}"
+        return s.rstrip("0").rstrip(".")
+
     if n >= 1_000_000_000:
-        val = f"{n/1_000_000_000:.2f}B"
+        val = trim_decimal(n / 1_000_000_000, 1) + "B"
     elif n >= 1_000_000:
-        val = f"{n/1_000_000:.2f}M"
+        val = trim_decimal(n / 1_000_000, 1) + "M"
     elif n >= 1_000:
-        val = f"{n/1_000:.2f}K"
+        val = f"{n/1_000:.0f}k"
     else:
         val = f"{n:.0f}"
     return f"{sign}${val}"
@@ -207,8 +238,12 @@ def kpis(df: pd.DataFrame) -> Tuple[float, int, float]:
     prof = pd.to_numeric(df["profit"], errors="coerce").fillna(0.0)
     profit_pct = float((prof.sum() / rev.sum()) if rev.sum() else np.nan)
 
-    if "source" in df.columns and not df["source"].isna().all():
-        orders = int(df["source"].notna().sum())
+    # Contar POs únicos (normalizados); si no hay `source`, fallback a #invoice únicos o filas
+    if "source" in df.columns and df["source"].notna().any():
+        uniq_pos = _canonical_po_series(df["source"]).dropna().unique()
+        orders = int(len(uniq_pos))
+    elif "invoice_num" in df.columns and df["invoice_num"].notna().any():
+        orders = int(pd.Series(df["invoice_num"]).nunique())
     else:
         orders = int(len(df))
 
@@ -271,6 +306,7 @@ if view_mode == "Annual (by Month)":
             xOffset=alt.XOffset("Year:N"),
             y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
             color=alt.Color("Year:N", scale=alt.Scale(domain=[str(prev_year), str(this_year)], range=["#1f77b4", "#ff7f0e"])),
+
             tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format="$,.0f")],
         ).properties(height=440)
 
@@ -389,6 +425,6 @@ else:
 st.caption(
     "Notes: The page uses **reqs_date exclusively**. Rows without a valid reqs_date are dropped. "
     "Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). "
-    "#PO's counts non-null `source` rows; if `source` is missing it falls back to row count. "
+    "#PO's counts unique normalized `source` values; if `source` is missing it falls back to unique invoices or row count. "
     "Black line = average revenue reference; Green line = goal."
 )
