@@ -241,7 +241,7 @@ if view_mode == "Annual (by Month)":
     avg_month_cur = float(cur_m["revenue"].mean()) if not cur_m.empty else 0.0
     pct_goal_avg_month = (avg_month_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
 
-    st.markdown(f"### KPI {this_year} (Vigente)")
+    st.markdown(f"### KPI {this_year} (Current)")
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         st.metric(f"%  {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
@@ -252,7 +252,7 @@ if view_mode == "Annual (by Month)":
     with c4:
         st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month:.1f}%")
 
-    st.markdown(f"### KPI {prev_year} (Pasado)")
+    st.markdown(f"### KPI {prev_year} (Last)")
     s1, s2, s3, s4 = st.columns([1, 1, 1, 1])
     with s1:
         st.metric(f"%  {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
@@ -331,7 +331,7 @@ else:
     pct_goal_day = (avg_day_cur / DAILY_GOAL * 100.0) if DAILY_GOAL else np.nan
 
     # KPI cards
-    st.markdown(f"### KPI {month_map[month_sel]} {this_year} (Vigente)")
+    st.markdown(f"### KPI {month_map[month_sel]} {this_year} (Current)")
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     with c1:
         st.metric(f"% {month_map[month_sel]} {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
@@ -344,7 +344,7 @@ else:
     with c5:
         st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day:.1f}%")
 
-    st.markdown(f"### KPI {month_map[month_sel]} {prev_year} (Pasado)")
+    st.markdown(f"### KPI {month_map[month_sel]} {prev_year} (Last)")
     s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
     with s1:
         st.metric(f"% {month_map[month_sel]} {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
