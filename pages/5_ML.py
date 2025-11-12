@@ -1,222 +1,309 @@
-# pages/02_SQL_Agent.py
-# Streamlit page: Natural language → SQL (ventas_frutto) con DeepSeek API (versión robusta sin f-strings en prompts)
-
-import os
-import json
 import re
-import textwrap
+from typing import Optional
+
+import numpy as np
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
-import requests
 
-st.set_page_config(page_title="SQL Agent — ventas_frutto (DeepSeek)", layout="wide")
+# Optional deps
+try:
+    import altair as alt
+    ALTAIR_OK = True
+except Exception:
+    ALTAIR_OK = False
 
-st.title("🧠 Analista SQL — ventas_frutto (DeepSeek)")
-st.caption("Consulta tu tabla con lenguaje natural, con reglas de Frutto Foods.")
+try:
+    from supabase import create_client  # pip install supabase
+except Exception:
+    create_client = None
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY") or st.secrets.get("DEEPSEEK_API_KEY", "")
-if not DEEPSEEK_API_KEY:
-    st.error("⚠️ Falta DEEPSEEK_API_KEY en secrets o entorno.")
+# ------------------------
+# PAGE CONFIG
+# ------------------------
+st.set_page_config(page_title="Commodity • Organic • Location → Vendors", page_icon="🧾", layout="wide")
+st.title("🧾 Commodity • Organic • Location → Vendors")
+st.caption("Filtra por *commodity*, si es *orgánico* y por *location*. Luego elige un vendor para ver qué productos ha vendido y cuántas facturas por producto.")
 
-DB_URL = (
-    os.getenv("DATABASE_URL")
-    or st.secrets.get("DATABASE_URL")
-    or st.secrets.get("POSTGRES_URL")
-    or ""
-)
+# ------------------------
+# HELPERS
+# ------------------------
 
-@st.cache_resource(show_spinner=False)
-def get_engine() -> Engine:
-    if not DB_URL:
-        raise ValueError("DATABASE_URL no configurada en secrets o variables de entorno.")
-    eng = create_engine(DB_URL, pool_pre_ping=True)
-    return eng
+def _normalize_txt(s: Optional[str]) -> str:
+    if s is None:
+        return ""
+    s = str(s).replace("\u00A0", " ")  # NBSP -> space
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
-FRUTTO_RULES = textwrap.dedent(
-    r"""
-    Rol: Eres un analista de datos senior de Frutto Foods especializado en PostgreSQL.
-    Tarea: traducir preguntas de negocio a consultas SQL correctas y eficientes contra la tabla ventas_frutto.
-    Usa date := COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date) y excluye canceladas.
-    Formato de salida JSON estricto con campos: assumptions, explanation, sql, suggestions.
-    """
-)
 
-SCHEMA_HINT = textwrap.dedent(
-    """
-    Columnas frecuentes: product, commoditie, sales_order, invoice_num, invoice_payment_status, sale_location, sales_rep,
-    customer, vendor, quantity, total_revenue, total_profit_usd, total_profit_pct, received_date, reqs_date, created_at.
-    """
-)
+def _fmt_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    df = df.copy()
+    for c in cols:
+        if c in df.columns:
+            s = pd.to_datetime(df[c], errors="coerce")
+            df[c] = s.dt.strftime("%Y-%m-%d").fillna("")
+    return df
 
-FEW_SHOT = [
-    {
-        "q": "Clientes de nuestro equipo y qué commodities consumen (sin canceladas)",
-        "a": textwrap.dedent(
-            """
-            WITH base AS (
-              SELECT
-                COALESCE(received_date, reqs_date, most_recent_invoice_paid_date, created_at::date) AS date,
-                customer, commoditie, sales_rep, sales_order, invoice_payment_status
-              FROM ventas_frutto
-            )
-            SELECT sales_rep, customer, commoditie, COUNT(*) AS lineas_venta, COUNT(DISTINCT sales_order) AS ordenes_unicas
-            FROM base
-            WHERE COALESCE(sales_rep, '') <> ''
-              AND COALESCE(customer, '') <> ''
-              AND COALESCE(commoditie, '') <> ''
-              AND COALESCE(invoice_payment_status, '') NOT ILIKE '%cancel%'
-            GROUP BY sales_rep, customer, commoditie
-            ORDER BY sales_rep, customer, lineas_venta DESC
-            LIMIT 5000;
-            """
-        ).strip(),
-    }
-]
 
-ROW_LIMIT_DEFAULT = 5000
-SQL_ONLY_SELECT = re.compile(r"^\s*SELECT\b", re.IGNORECASE | re.DOTALL)
+def _styled_table(df_disp: pd.DataFrame, styles: dict) -> "pd.io.formats.style.Styler":
+    return df_disp.style.format(styles, na_rep="")
 
-def enforce_select_and_limit(sql: str, default_limit: int = ROW_LIMIT_DEFAULT) -> str:
-    sql_clean = sql.strip().rstrip(";")
-    if not SQL_ONLY_SELECT.search(sql_clean):
-        raise ValueError("Sólo se permiten consultas SELECT.")
-    if re.search(r"\bLIMIT\b", sql_clean, re.IGNORECASE) is None:
-        sql_clean = f"{sql_clean}\nLIMIT {default_limit}"
-    return sql_clean
 
-def run_query(engine: Engine, sql: str) -> pd.DataFrame:
-    with engine.connect() as conn:
-        return pd.read_sql_query(text(sql), conn)
+def _load_supabase_client(secret_key: str):
+    sec = st.secrets.get(secret_key, None)
+    if not sec or not create_client:
+        return None
+    url = sec.get("url")
+    key = sec.get("anon_key")
+    if not url or not key:
+        return None
+    return create_client(url, key)
 
-def call_deepseek(question: str) -> dict:
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-    user_prompt = "Consulta de negocio: {}\n\nPistas de esquema:\n{}\n\nEjemplo:\n{}".format(
-        question.strip(), SCHEMA_HINT, FEW_SHOT[0]["a"]
-    )
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {"role": "system", "content": FRUTTO_RULES},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 1200,
-    }
-    url = "https://api.deepseek.com/v1/chat/completions"
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    txt = data.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-
-    s = txt.strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\\s*", "", s)
-        s = re.sub(r"\\s*```$", "", s)
-    first_brace, last_brace = s.find('{'), s.rfind('}')
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        s = s[first_brace:last_brace+1]
-
-    try:
-        parsed = json.loads(s)
-    except Exception:
-        parsed = json.loads(s.encode('utf-8', 'ignore').decode('utf-8', 'ignore'))
-
-    for k in ("assumptions", "explanation", "sql", "suggestions"):
-        parsed.setdefault(k, "")
-    return parsed
-
-# === UI ===
-with st.sidebar:
-    st.subheader("Ajustes")
-    enforced_limit = st.number_input("LIMIT por defecto", 100, 20000, ROW_LIMIT_DEFAULT, step=100)
-    show_sql = st.checkbox("Mostrar SQL", value=True)
-    run_auto = st.checkbox("Ejecutar automáticamente", value=True)
-
-st.markdown("**Sugerencias rápidas**")
-col1, col2, col3 = st.columns(3)
-with col1:
-    if st.button("Clientes por sales_rep y commodity"):
-        st.session_state["_demo_q"] = "Lista los clientes de cada sales_rep y los commodities que consumen (excluye canceladas)."
-with col2:
-    if st.button("Top 20 commodities por revenue (90 días)"):
-        st.session_state["_demo_q"] = "Top 20 commodities por revenue últimos 90 días, sin canceladas."
-with col3:
-    if st.button("Margen por cliente (YTD)"):
-        st.session_state["_demo_q"] = "Margen % por cliente y commodity año actual, sin canceladas."
-
-q_default = st.session_state.get("_demo_q", "Clientes de nuestro equipo y qué commodities consumen (sin canceladas)")
-question = st.text_area("Pregunta de negocio", value=q_default, height=100)
-colA, colB = st.columns(2)
-with colA:
-    go = st.button("🔍 Generar SQL")
-with colB:
-    clear = st.button("🧹 Limpiar")
-if clear:
-    st.session_state.pop("_out", None)
-    st.session_state.pop("_res", None)
-
-if go and question.strip():
-    try:
-        out = call_deepseek(question)
-        st.session_state["_out"] = out
-    except Exception as e:
-        st.error(f"Error generando SQL: {e}")
-
-out = st.session_state.get("_out")
-if out:
-    if out.get("assumptions"):
-        st.info(out["assumptions"])
-    st.write(out.get("explanation", ""))
-
-    sql_raw = out.get("sql", "").strip()
-    try:
-        sql_safe = enforce_select_and_limit(sql_raw, default_limit=int(enforced_limit))
-    except Exception as e:
-        st.error(f"SQL inválido: {e}")
-        sql_safe = ""
-
-    if show_sql and sql_safe:
-        st.code(sql_safe, language="sql")
-
-    if sql_safe and (run_auto or st.button("▶️ Ejecutar consulta")):
-        try:
-            df = run_query(get_engine(), sql_safe)
-            st.session_state["_res"] = df
-        except Exception as e:
-            st.error(f"Error al ejecutar la consulta: {e}")
-
-    if out.get("suggestions"):
-        with st.expander("💡 Recomendaciones"):
-            st.markdown(out["suggestions"])
-
-res = st.session_state.get("_res")
-if isinstance(res, pd.DataFrame):
-    st.subheader("Resultados")
-    if res.empty:
-        st.warning("La consulta no devolvió filas.")
+# ------------------------
+# DATA LOADER
+# ------------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sales() -> pd.DataFrame:
+    sb = _load_supabase_client("supabase_sales")
+    if sb:
+        table_name = st.secrets.get("supabase_sales", {}).get("table", "ventas_frutto")
+        rows, limit, offset = [], 1000, 0
+        while True:
+            q = sb.table(table_name).select("*").range(offset, offset + limit - 1).execute()
+            data = q.data or []
+            rows.extend(data)
+            got = len(data)
+            if got < limit:
+                break
+            offset += got
+        df = pd.DataFrame(rows)
     else:
-        st.dataframe(res, use_container_width=True)
-        try:
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.metric("Filas", f"{len(res):,}")
-            with c2:
-                if "total_revenue" in res.columns:
-                    st.metric("Revenue (sum)", f"${res['total_revenue'].sum():,.0f}")
-            with c3:
-                if "total_profit_usd" in res.columns:
-                    st.metric("Profit (sum)", f"${res['total_profit_usd'].sum():,.0f}")
-            with c4:
-                if set(["total_profit_usd", "total_revenue"]).issubset(res.columns):
-                    num = res["total_profit_usd"].sum()
-                    den = res["total_revenue"].sum()
-                    pct = (num / den * 100.0) if den else None
-                    st.metric("Margen %", f"{pct:.1f}%" if pct is not None else "—")
-        except Exception:
-            pass
-        csv = res.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Descargar CSV", data=csv, file_name="sql_agent_result.csv", mime="text/csv")
+        st.error("No sales source found (st.secrets['supabase_sales']).")
+        return pd.DataFrame()
 
-st.caption("Solo se ejecutan SELECT y se aplica LIMIT por defecto. DeepSeek produce JSON robusto.")
+    if df.empty:
+        return df
+
+    alias_map = {
+        # Dates
+        "reqs_date": ["reqs_date"],
+        "received_date": ["received_date"],
+        "created_at": ["created_at"],
+        # IDs
+        "invoice_num": ["invoice_num", "invoice #", "invoice"],
+        "sales_order": ["sales_order"],
+        # Dimensions
+        "vendor": ["vendor", "shipper", "supplier"],
+        "customer": ["customer", "customer_name", "client", "cliente"],
+        "product": [
+            "product", "item", "item_name", "product_name", "desc", "description",
+            "sku", "upc", "gtin"
+        ],
+        "commodity": ["commodity", "comodity", "commoditie", "cooditie", "category", "family", "product_group"],
+        "lot_location": ["lot_location", "location", "lot", "loc"],
+        # Optional organic flag (will also infer from text)
+        "is_organic": ["is_organic", "organic", "og", "bio", "is_og", "organico", "org"],
+        # Metrics
+        "quantity": ["quantity", "qty"],
+        "total_revenue": ["total_revenue", "total", "line_total", "revenue"],
+        "price_per_unit": ["price_per_unit", "sell_price", "unit_price", "price"],
+    }
+
+    std = {}
+    for std_col, candidates in alias_map.items():
+        found = None
+        for c in candidates:
+            if c in df.columns:
+                found = c
+                break
+        std[std_col] = df[found] if found else pd.Series([None] * len(df))
+
+    sdf = pd.DataFrame(std)
+
+    # Types
+    for c in ["reqs_date", "received_date", "created_at"]:
+        sdf[c] = pd.to_datetime(sdf[c], errors="coerce")
+
+    # Canonicals
+    sdf["vendor_c"] = sdf["vendor"].astype(str).map(_normalize_txt)
+    sdf["product_c"] = sdf["product"].astype(str).map(_normalize_txt)
+    sdf["customer_c"] = sdf["customer"].astype(str).map(_normalize_txt)
+    sdf["commodity_c"] = sdf["commodity"].astype(str).map(_normalize_txt)
+    sdf["location_c"] = sdf["lot_location"].astype(str).map(_normalize_txt)
+
+    # Display labels
+    sdf["vendor_disp"] = sdf["vendor"].astype(str).str.title()
+    sdf["product_disp"] = sdf["product"].astype(str)
+    sdf["customer_disp"] = sdf["customer"].astype(str).str.title()
+    sdf["commodity_disp"] = sdf["commodity"].astype(str).str.title()
+    sdf["location_disp"] = sdf["lot_location"].astype(str).str.title()
+
+    # Unified date & order id
+    sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"]).fillna(sdf["created_at"])  # fallback chain
+    sdf["date"] = pd.to_datetime(sdf["date"], errors="coerce")
+    sdf["order_id"] = sdf["invoice_num"].astype(str)
+    sdf.loc[sdf["order_id"].isin(["nan", "none", "", "NaT"]), "order_id"] = np.nan
+
+    # Organic boolean (column or inferred from text)
+    def infer_organic(row):
+        # explicit column first
+        v = str(row.get("is_organic", "")).strip().lower()
+        if v in {"true", "t", "1", "yes", "y", "si", "sí"}:
+            return True
+        if v in {"false", "f", "0", "no", "n"}:
+            return False
+        # infer from product / commodity text
+        txt = " ".join([
+            str(row.get("product", "")),
+            str(row.get("commodity", ""))
+        ]).lower()
+        return any(k in txt for k in ["organic", "org.", "og ", " og", "bio", "org-", "org/"])
+
+    sdf["is_organic_bool"] = sdf.apply(infer_organic, axis=1)
+
+    return sdf
+
+# ------------------------
+# SIDEBAR FILTERS
+# ------------------------
+with st.sidebar:
+    st.subheader("Filtros")
+
+    today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
+    default_start = (today_bo - pd.Timedelta(days=30)).tz_localize(None)
+    default_end = today_bo.tz_localize(None)
+
+    date_range = st.date_input("Date range", value=(default_start, default_end))
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date = pd.Timestamp(date_range[0])
+        end_date = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)  # end exclusive
+    else:
+        start_date, end_date = default_start, default_end + pd.Timedelta(days=1)
+
+# ------------------------
+# DATA
+# ------------------------
+sdf = load_sales()
+if sdf.empty:
+    st.stop()
+
+mask = (sdf["date"] >= start_date) & (sdf["date"] < end_date)
+sdf_f = sdf[mask].copy()
+
+# Dropdowns based on filtered window
+with st.sidebar:
+    comm_opts = [""] + sorted(sdf_f["commodity_disp"].dropna().unique().tolist())
+    commodity_sel = st.selectbox("Commodity", options=comm_opts, index=0, placeholder="Select...")
+
+    org_opts = ["All", "Organic", "Conventional"]
+    org_sel = st.selectbox("Organic?", options=org_opts, index=0)
+
+    loc_opts = [""] + sorted(sdf_f["location_disp"].dropna().unique().tolist())
+    loc_sel = st.selectbox("Location", options=loc_opts, index=0, placeholder="Select...")
+
+# Apply filters
+if commodity_sel:
+    cm_norm = _normalize_txt(commodity_sel)
+    sdf_f = sdf_f[sdf_f["commodity_c"] == cm_norm]
+
+if org_sel != "All":
+    want_org = (org_sel == "Organic")
+    sdf_f = sdf_f[sdf_f["is_organic_bool"] == want_org]
+
+if loc_sel:
+    loc_norm = _normalize_txt(loc_sel)
+    sdf_f = sdf_f[sdf_f["location_c"] == loc_norm]
+
+st.caption(f"Rows after filters: **{len(sdf_f)}** | Vendors: **{sdf_f['vendor_c'].nunique()}** | Products: **{sdf_f['product_c'].nunique()}**")
+
+if sdf_f.empty:
+    st.warning("No hay datos para esos filtros / rango.")
+    st.stop()
+
+# ------------------------
+# VENDOR LIST + SELECTION
+# ------------------------
+# Summary per vendor (count invoices)
+if sdf_f["order_id"].notna().any():
+    vend_summary = sdf_f.groupby("vendor_c").agg(
+        Vendor=("vendor_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+        Invoices=("order_id", "nunique"),
+        Products=("product_c", "nunique"),
+    ).reset_index(drop=True).sort_values("Invoices", ascending=False)
+else:
+    vend_summary = sdf_f.groupby("vendor_c").agg(
+        Vendor=("vendor_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+        Invoices=("product_c", "count"),  # row proxy
+        Products=("product_c", "nunique"),
+    ).reset_index(drop=True).sort_values("Invoices", ascending=False)
+
+left, right = st.columns([1, 1])
+with left:
+    st.subheader("🏷️ Vendors (según filtros)")
+    st.dataframe(
+        _styled_table(vend_summary, {"Invoices": "{:,.0f}", "Products": "{:,.0f}"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with right:
+    vend_opts = [""] + vend_summary["Vendor"].tolist()
+    vendor_sel = st.selectbox("Elige un vendor para detallar productos", options=vend_opts, index=0, placeholder="Select...")
+
+if not vendor_sel:
+    st.info("Selecciona un vendor para ver productos e invoices.")
+    st.stop()
+
+vend_norm = _normalize_txt(vendor_sel)
+vslice = sdf_f[sdf_f["vendor_c"] == vend_norm].copy()
+
+# ------------------------
+# PRODUCT → COUNT(Invoice) for selected vendor
+# ------------------------
+st.subheader(f"🧺 Productos comprados a {vendor_sel}")
+
+if vslice["order_id"].notna().any():
+    prod_pvt = (
+        vslice.groupby("product_c").agg(
+            Product=("product_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+            Invoices=("order_id", "nunique"),
+            Units=("quantity", "sum"),
+            Revenue=("total_revenue", "sum"),
+        ).reset_index(drop=True)
+    )
+else:
+    prod_pvt = (
+        vslice.groupby("product_c").agg(
+            Product=("product_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+            Invoices=("product_c", "count"),  # row proxy
+            Units=("quantity", "sum"),
+            Revenue=("total_revenue", "sum"),
+        ).reset_index(drop=True)
+    )
+
+prod_pvt = prod_pvt.sort_values(["Invoices", "Revenue"], ascending=[False, False])
+
+st.dataframe(
+    _styled_table(prod_pvt, {"Invoices": "{:,.0f}", "Units": "{:,.0f}", "Revenue": "${:,.0f}"}),
+    use_container_width=True,
+    hide_index=True,
+)
+
+# Optional chart to resemble the visual intent (top by invoices)
+if ALTAIR_OK and len(prod_pvt) > 0:
+    chart = alt.Chart(prod_pvt.head(25)).mark_bar().encode(
+        x=alt.X("Invoices:Q", title="Count of Invoice #"),
+        y=alt.Y("Product:N", sort="-x"),
+        tooltip=["Product", "Invoices", "Units", "Revenue"],
+    ).properties(height=420)
+    st.altair_chart(chart, use_container_width=True)
+
+# ------------------------
+# EXPORTS
+# ------------------------
+vend_csv = vend_summary.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Vendors (resumen)", data=vend_csv, file_name="vendors_by_filters.csv", mime="text/csv")
+
+prod_csv = prod_pvt.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Productos por vendor", data=prod_csv, file_name=f"products_by_vendor_{vend_norm or 'all'}.csv", mime="text/csv")
