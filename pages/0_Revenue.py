@@ -1,10 +1,11 @@
 # revenue_yoy_by_month_and_day.py
-# Streamlit page: Revenue YoY — by Month and by Day
+# Streamlit page: Revenue YoY — by Month and by Day (uses ONLY reqs_date)
 # - Bars: side-by-side (this year vs last year)
 # - Labels: $ compact ($4.0k, $1.2M)
-# - Green line: goal (monthly or daily)
-# - Black line: average revenue of the selected period (raw average, not %)
-# - KPI cards for both periods; extra goal progress cards
+# - Green line: goal (monthly/daily)
+# - Black line: average revenue reference (raw average, not %)
+# - KPIs for both periods; goal progress cards
+# - DATE SOURCE: STRICTLY reqs_date
 
 import re
 from typing import Optional, Tuple
@@ -38,8 +39,8 @@ st.set_page_config(page_title="Revenue YoY • Months & Days", page_icon="📊",
 st.title("📊 Revenue YoY — by Month and by Day")
 st.caption(
     "Compare total revenue Year-over-Year. Switch between **Annual (by Month)** and **Monthly (by Day)** views. "
-    "KPI cards show Profit %, #Orders (count of `source` rows when available), and Total Revenue (short format) "
-    "for current vs prior period. Green line = goal. Black line = average revenue reference."
+    "KPI cards show Profit %, #Orders (count of `source` rows when available), and Total Revenue (short format). "
+    "Green line = goal. Black line = average revenue reference. **Date source: reqs_date only.**"
 )
 
 # ------------------------
@@ -48,7 +49,7 @@ st.caption(
 def _normalize_txt(s: Optional[str]) -> str:
     if s is None:
         return ""
-    s = str(s).replace("\u00A0", " ")  # NBSP → space
+    s = str(s).replace("\u00A0", " ")
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
@@ -83,7 +84,7 @@ def _load_supabase_client(secret_key: str):
     return create_client(url, key)
 
 # ------------------------
-# DATA LOADER
+# DATA LOADER  (reqs_date only)
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def load_sales() -> pd.DataFrame:
@@ -108,13 +109,11 @@ def load_sales() -> pd.DataFrame:
         return df
 
     alias_map = {
-        # Dates
+        # Dates (we will use reqs_date strictly)
         "reqs_date": ["reqs_date"],
-        "received_date": ["received_date"],
-        "created_at": ["created_at"],
         # IDs
         "invoice_num": ["invoice_num", "invoice #", "invoice"],
-        # Dimensions (only those needed here)
+        # Dimensions (minimal)
         "customer": ["customer", "customer_name", "client", "cliente"],
         "product": ["product", "item", "item_name", "product_name", "desc", "description"],
         # Metrics
@@ -123,7 +122,7 @@ def load_sales() -> pd.DataFrame:
         # Optional profit & cost
         "profit": ["profit", "gross_profit", "gp", "margin_amount"],
         "total_cost": ["total_cost", "cost", "cogs"],
-        # Orders counter source (for #orders as requested)
+        # Orders counter source (for #orders)
         "source": ["source", "po", "purchase_order", "sales_order", "order_ref"],
     }
 
@@ -139,15 +138,17 @@ def load_sales() -> pd.DataFrame:
     sdf = pd.DataFrame(std)
 
     # Types
-    for c in ["reqs_date", "received_date", "created_at"]:
-        sdf[c] = pd.to_datetime(sdf[c], errors="coerce")
+    sdf["reqs_date"] = pd.to_datetime(sdf["reqs_date"], errors="coerce")  # <-- ONLY this date is used
     for c in ["quantity", "total_revenue", "profit", "total_cost"]:
         if c in sdf.columns:
             sdf[c] = pd.to_numeric(sdf[c], errors="coerce")
 
-    # Unified date
-    sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"]).fillna(sdf["created_at"])
-    sdf["date"] = pd.to_datetime(sdf["date"], errors="coerce")
+    # Require valid reqs_date
+    sdf = sdf.dropna(subset=["reqs_date"]).copy()
+    sdf["date"] = sdf["reqs_date"]  # alias for downstream code
+    sdf["year"] = sdf["date"].dt.year
+    sdf["month"] = sdf["date"].dt.month
+    sdf["day"] = sdf["date"].dt.day
 
     # Derive profit if missing but cost present
     if "profit" not in sdf.columns or sdf["profit"].isna().all():
@@ -158,9 +159,7 @@ def load_sales() -> pd.DataFrame:
 
     # Profit % (row level) — safe division
     sdf["profit_pct"] = np.where(
-        sdf["total_revenue"].abs() > 1e-9,
-        sdf["profit"] / sdf["total_revenue"],
-        np.nan,
+        sdf["total_revenue"].abs() > 1e-9, sdf["profit"] / sdf["total_revenue"], np.nan
     )
 
     # Orders proxy if `source` missing → fall back to row count later
@@ -172,23 +171,17 @@ def load_sales() -> pd.DataFrame:
 # ------------------------
 # SIDEBAR (controls)
 # ------------------------
-sdf_all = load_sales()
-if sdf_all.empty:
+sdf = load_sales()
+if sdf.empty:
+    st.warning("No data with a valid `reqs_date` found.")
     st.stop()
 
 with st.sidebar:
     st.subheader("Controls")
-
-    # View mode
     view_mode = st.radio("View", options=["Annual (by Month)", "Monthly (by Day)"], index=0)
 
-    # Year & Month pickers from available data
-    sdf_dates = sdf_all.dropna(subset=["date"])
-    years_available = sorted({d.year for d in pd.to_datetime(sdf_dates["date"], errors="coerce").dropna()})
-    if not years_available:
-        years_available = [pd.Timestamp.today().year]
+    years_available = sorted(sdf["year"].unique().tolist())
     current_year_default = max(years_available)
-
     year_sel = st.selectbox("Year", options=years_available, index=years_available.index(current_year_default))
 
     month_names = [
@@ -198,29 +191,22 @@ with st.sidebar:
     month_map = {i+1: m for i, m in enumerate(month_names)}
 
     if view_mode == "Monthly (by Day)":
-        today = pd.Timestamp.today()
-        default_month_idx = min(max(today.month - 1, 0), 11)
+        # Default to current month if present; otherwise first available in that year
+        months_this_year = sorted(sdf.loc[sdf["year"] == year_sel, "month"].unique().tolist())
+        default_month_idx = (months_this_year[-1] - 1) if months_this_year else 0
         month_sel_name = st.selectbox("Month", options=month_names, index=default_month_idx)
         month_sel = month_names.index(month_sel_name) + 1
     else:
         month_sel = None
 
 # ------------------------
-# DATA (feature columns)
+# KPI helper
 # ------------------------
-sdf = sdf_all.dropna(subset=["date"]).copy()
-sdf["year"] = sdf["date"].dt.year
-sdf["month"] = sdf["date"].dt.month
-sdf["day"] = sdf["date"].dt.day
-
-# Helper: aggregate KPI (profit %, #orders, total revenue) for a frame
 def kpis(df: pd.DataFrame) -> Tuple[float, int, float]:
-    # Profit % — weighted by revenue
     rev = pd.to_numeric(df["total_revenue"], errors="coerce").fillna(0.0)
     prof = pd.to_numeric(df["profit"], errors="coerce").fillna(0.0)
     profit_pct = float((prof.sum() / rev.sum()) if rev.sum() else np.nan)
 
-    # #Orders — non-null `source` if present else rows
     if "source" in df.columns and not df["source"].isna().all():
         orders = int(df["source"].notna().sum())
     else:
@@ -239,13 +225,8 @@ if view_mode == "Annual (by Month)":
     cur = sdf[sdf["year"] == this_year]
     prv = sdf[sdf["year"] == prev_year]
 
-    # month aggregates
-    def agg_month(df):
-        return (
-            df.groupby("month").agg(
-                revenue=("total_revenue", "sum")
-            ).reset_index()
-        )
+    def agg_month(df: pd.DataFrame) -> pd.DataFrame:
+        return df.groupby("month").agg(revenue=("total_revenue", "sum")).reset_index()
 
     cur_m = agg_month(cur)
     prv_m = agg_month(prv)
@@ -281,10 +262,8 @@ if view_mode == "Annual (by Month)":
     allm["Month"] = allm["month"].map({i: n for i, n in enumerate(month_names, start=1)})
 
     if ALTAIR_OK:
-        # Black mean line = average revenue of current year months shown (raw value)
-        mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()
+        mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()  # black line (average)
         mean_rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6, 4], color="#000").encode(y="y:Q")
-        # Green goal line = monthly target
         goal_rule = alt.Chart(pd.DataFrame({"y": [MONTHLY_GOAL]})).mark_rule(strokeDash=[4, 4], color="green").encode(y="y:Q")
 
         base = alt.Chart(allm).mark_bar().encode(
@@ -328,13 +307,8 @@ else:
     cur = sdf[(sdf["year"] == this_year) & (sdf["month"] == month_sel)]
     prv = sdf[(sdf["year"] == prev_year) & (sdf["month"] == month_sel)]
 
-    # day aggregates
-    def agg_day(df):
-        return (
-            df.groupby("day").agg(
-                revenue=("total_revenue", "sum")
-            ).reset_index()
-        )
+    def agg_day(df: pd.DataFrame) -> pd.DataFrame:
+        return df.groupby("day").agg(revenue=("total_revenue", "sum")).reset_index()
 
     cur_d = agg_day(cur)
     prv_d = agg_day(prv)
@@ -375,10 +349,8 @@ else:
     alld = pd.concat([cur_d, prv_d], ignore_index=True)
 
     if ALTAIR_OK:
-        # Black mean line = average revenue of current-year days in the month
-        mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()
+        mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()  # black line (average)
         mean_rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6, 4], color="#000").encode(y="y:Q")
-        # Green goal line = daily target
         goal_rule = alt.Chart(pd.DataFrame({"y": [DAILY_GOAL]})).mark_rule(strokeDash=[4, 4], color="green").encode(y="y:Q")
 
         base = alt.Chart(alld).mark_bar().encode(
@@ -415,7 +387,8 @@ else:
 # NOTES
 # ------------------------
 st.caption(
-    "Notes: Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). "
-    "#PO's counts non-null `source` rows; if `source` is missing it falls back to total rows in the period. "
+    "Notes: The page uses **reqs_date exclusively**. Rows without a valid reqs_date are dropped. "
+    "Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). "
+    "#PO's counts non-null `source` rows; if `source` is missing it falls back to row count. "
     "Black line = average revenue reference; Green line = goal."
 )
