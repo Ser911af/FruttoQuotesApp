@@ -39,7 +39,7 @@ st.set_page_config(page_title="Revenue YoY • Months & Days", page_icon="📊",
 st.title("📊 Revenue YoY — by Month and by Day")
 st.caption(
     "Compare total revenue Year-over-Year. Switch between **Annual (by Month)** and **Monthly (by Day)** views. "
-    "KPI cards show Profit %, #PO's (count of UNIQUE `source` values), and Total Revenue (short format). "
+    "KPI cards show Profit %, #Orders (unique normalized `source`), and Total Revenue (short format). "
     "Green line = goal. Black line = average revenue reference. **Date source: reqs_date only.**"
 )
 
@@ -54,17 +54,47 @@ def _normalize_txt(s: Optional[str]) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
+def _canonical_po_series(s: pd.Series) -> pd.Series:
+    """
+    Normaliza los PO en `source` para poder contar únicos.
+    - Acepta variantes como 'PO #4926', 'po4926', 'Po   #  4926'
+    - Devuelve 'po-<id>' si detecta patrón, sino el texto limpio.
+    """
+    def canon(x):
+        if pd.isna(x):
+            return np.nan
+        t = _normalize_txt(x)
+        # extrae lo que sigue a 'po' (números/letras/guiones)
+        m = re.search(r"\bpo\s*#?\s*([a-z0-9\-]+)", t)
+        if m:
+            return f"po-{m.group(1)}"
+        return t if t else np.nan
+    return s.apply(canon)
+
 def _abbr(n: float) -> str:
-    """Format number to compact representation (e.g., 678987 → 679k)"""
+    """
+    Formato corto para KPIs:
+    - 678987 => $679k
+    - 1_554_800 => $1.6M
+    - 3_100_000_000 => $3B
+    Reglas:
+      - 'k' sin decimales (compacto)
+      - 'M' y 'B' con 1 decimal, quitando .0 si aplica
+    """
     if n is None or (isinstance(n, float) and np.isnan(n)):
         return "$0"
     n = float(n)
     sign = "-" if n < 0 else ""
     n = abs(n)
+
+    def trim_decimal(x: float, digits: int = 1) -> str:
+        s = f"{x:.{digits}f}"
+        return s.rstrip("0").rstrip(".")
+
     if n >= 1_000_000_000:
-        val = f"{n/1_000_000_000:.1f}B"
+        val = trim_decimal(n / 1_000_000_000, 1) + "B"
     elif n >= 1_000_000:
-        val = f"{n/1_000_000:.1f}M"
+        val = trim_decimal(n / 1_000_000, 1) + "M"
     elif n >= 1_000:
         val = f"{n/1_000:.0f}k"
     else:
@@ -201,16 +231,19 @@ with st.sidebar:
         month_sel = None
 
 # ------------------------
-# KPI helper (MEJORADO: cuenta PO's ÚNICOS)
+# KPI helper
 # ------------------------
 def kpis(df: pd.DataFrame) -> Tuple[float, int, float]:
     rev = pd.to_numeric(df["total_revenue"], errors="coerce").fillna(0.0)
     prof = pd.to_numeric(df["profit"], errors="coerce").fillna(0.0)
     profit_pct = float((prof.sum() / rev.sum()) if rev.sum() else np.nan)
 
-    # Contar SOLO valores únicos de source (PO's únicos)
-    if "source" in df.columns and not df["source"].isna().all():
-        orders = int(df["source"].nunique())  # CAMBIO: .nunique() en lugar de .notna().sum()
+    # Contar POs únicos (normalizados); si no hay `source`, fallback a #invoice únicos o filas
+    if "source" in df.columns and df["source"].notna().any():
+        uniq_pos = _canonical_po_series(df["source"]).dropna().unique()
+        orders = int(len(uniq_pos))
+    elif "invoice_num" in df.columns and df["invoice_num"].notna().any():
+        orders = int(pd.Series(df["invoice_num"]).nunique())
     else:
         orders = int(len(df))
 
@@ -239,9 +272,13 @@ if view_mode == "Annual (by Month)":
 
     # Goal progress (annual view uses monthly goal context)
     avg_month_cur = float(cur_m["revenue"].mean()) if not cur_m.empty else 0.0
-    pct_goal_avg_month = (avg_month_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
+    pct_goal_avg_month_cur = (avg_month_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
 
-    st.markdown(f"### KPI {this_year} (Vigente)")
+    avg_month_prv = float(prv_m["revenue"].mean()) if not prv_m.empty else 0.0
+    pct_goal_avg_month_prv = (avg_month_prv / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
+
+    # === KPIs ROWS (two-level layout) ===
+    # Row 1: current year
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         st.metric(f"%  {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
@@ -250,18 +287,18 @@ if view_mode == "Annual (by Month)":
     with c3:
         st.metric(f"Revenue  {this_year}", value=_abbr(cur_k[2]))
     with c4:
-        st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month:.1f}%")
+        st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month_cur:.1f}%")
 
-    st.markdown(f"### KPI {prev_year} (Pasado)")
-    s1, s2, s3, s4 = st.columns([1, 1, 1, 1])
-    with s1:
+    # Row 2: previous year
+    p1, p2, p3, p4 = st.columns([1, 1, 1, 1])
+    with p1:
         st.metric(f"%  {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
-    with s2:
+    with p2:
         st.metric(f"#PO's  {prev_year}", value=f"{prv_k[1]:,}")
-    with s3:
+    with p3:
         st.metric(f"Revenue  {prev_year}", value=_abbr(prv_k[2]))
-    with s4:
-        st.metric("Avg Month vs Goal", value=f"{(float(prv_m['revenue'].mean()) / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL and not prv_m.empty else np.nan:.1f}%")
+    with p4:
+        st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month_prv:.1f}%")
 
     # Build dataset for chart (side-by-side bars with labels)
     cur_m["Year"], prv_m["Year"] = str(this_year), str(prev_year)
@@ -269,7 +306,7 @@ if view_mode == "Annual (by Month)":
     allm["Month"] = allm["month"].map({i: n for i, n in enumerate(month_names, start=1)})
 
     if ALTAIR_OK:
-        mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()  # black line (average)
+        mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()  # black line (average - current year)
         mean_rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6, 4], color="#000").encode(y="y:Q")
         goal_rule = alt.Chart(pd.DataFrame({"y": [MONTHLY_GOAL]})).mark_rule(strokeDash=[4, 4], color="green").encode(y="y:Q")
 
@@ -324,14 +361,19 @@ else:
     cur_k = kpis(cur)
     prv_k = kpis(prv)
 
-    # Goal progress within month
+    # Goal progress within month (compute for both years)
     month_total_cur = float(cur_d["revenue"].sum() if not cur_d.empty else 0.0)
-    pct_goal_month = (month_total_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
+    pct_goal_month_cur = (month_total_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
     avg_day_cur = float(cur_d["revenue"].mean() if not cur_d.empty else 0.0)
-    pct_goal_day = (avg_day_cur / DAILY_GOAL * 100.0) if DAILY_GOAL else np.nan
+    pct_goal_day_cur = (avg_day_cur / DAILY_GOAL * 100.0) if DAILY_GOAL else np.nan
 
-    # KPI cards
-    st.markdown(f"### KPI {month_map[month_sel]} {this_year} (Vigente)")
+    month_total_prv = float(prv_d["revenue"].sum() if not prv_d.empty else 0.0)
+    pct_goal_month_prv = (month_total_prv / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
+    avg_day_prv = float(prv_d["revenue"].mean() if not prv_d.empty else 0.0)
+    pct_goal_day_prv = (avg_day_prv / DAILY_GOAL * 100.0) if DAILY_GOAL else np.nan
+
+    # === KPIs ROWS (two-level layout) ===
+    # Row 1: current year
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     with c1:
         st.metric(f"% {month_map[month_sel]} {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
@@ -340,31 +382,29 @@ else:
     with c3:
         st.metric(f"Revenue {month_map[month_sel]} {this_year}", value=_abbr(cur_k[2]))
     with c4:
-        st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month:.1f}%")
+        st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month_cur:.1f}%")
     with c5:
-        st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day:.1f}%")
+        st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day_cur:.1f}%")
 
-    st.markdown(f"### KPI {month_map[month_sel]} {prev_year} (Pasado)")
-    s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
-    with s1:
+    # Row 2: previous year
+    p1, p2, p3, p4, p5 = st.columns([1, 1, 1, 1, 1])
+    with p1:
         st.metric(f"% {month_map[month_sel]} {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
-    with s2:
+    with p2:
         st.metric(f"#PO's {month_map[month_sel]} {prev_year}", value=f"{prv_k[1]:,}")
-    with s3:
+    with p3:
         st.metric(f"Revenue {month_map[month_sel]} {prev_year}", value=_abbr(prv_k[2]))
-    with s4:
-        pct_goal_month_prev = (float(prv_d["revenue"].sum() / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL and not prv_d.empty else np.nan)
-        st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month_prev:.1f}%")
-    with s5:
-        pct_goal_day_prev = (float(prv_d["revenue"].mean() / DAILY_GOAL * 100.0) if DAILY_GOAL and not prv_d.empty else np.nan)
-        st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day_prev:.1f}%")
+    with p4:
+        st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month_prv:.1f}%")
+    with p5:
+        st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day_prv:.1f}%")
 
     # Build dataset for chart (side-by-side bars with labels)
     cur_d["Year"], prv_d["Year"] = str(this_year), str(prev_year)
     alld = pd.concat([cur_d, prv_d], ignore_index=True)
 
     if ALTAIR_OK:
-        mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()  # black line (average)
+        mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()  # black line (average - current year)
         mean_rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6, 4], color="#000").encode(y="y:Q")
         goal_rule = alt.Chart(pd.DataFrame({"y": [DAILY_GOAL]})).mark_rule(strokeDash=[4, 4], color="green").encode(y="y:Q")
 
@@ -404,6 +444,6 @@ else:
 st.caption(
     "Notes: The page uses **reqs_date exclusively**. Rows without a valid reqs_date are dropped. "
     "Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). "
-    "#PO's counts UNIQUE `source` values; if `source` is missing it falls back to row count. "
+    "#PO's counts unique normalized `source` values; if `source` is missing it falls back to unique invoices or row count. "
     "Black line = average revenue reference; Green line = goal."
 )
