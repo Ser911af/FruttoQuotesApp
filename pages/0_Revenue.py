@@ -39,7 +39,7 @@ st.set_page_config(page_title="Revenue YoY • Months & Days", page_icon="📊",
 st.title("📊 Revenue YoY — by Month and by Day")
 st.caption(
     "Compare total revenue Year-over-Year. Switch between **Annual (by Month)** and **Monthly (by Day)** views. "
-    "KPI cards show Profit %, #Orders (count of `source` rows when available), and Total Revenue (short format). "
+    "KPI cards show Profit %, #PO's (count of UNIQUE `source` values), and Total Revenue (short format). "
     "Green line = goal. Black line = average revenue reference. **Date source: reqs_date only.**"
 )
 
@@ -54,47 +54,17 @@ def _normalize_txt(s: Optional[str]) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-def _canonical_po_series(s: pd.Series) -> pd.Series:
-    """
-    Normaliza los PO en `source` para poder contar únicos.
-    - Acepta variantes como 'PO #4926', 'po4926', 'Po   #  4926'
-    - Devuelve 'po-<id>' si detecta patrón, sino el texto limpio.
-    """
-    def canon(x):
-        if pd.isna(x):
-            return np.nan
-        t = _normalize_txt(x)
-        # extrae lo que sigue a 'po' (números/letras/guiones)
-        m = re.search(r"\bpo\s*#?\s*([a-z0-9\-]+)", t)
-        if m:
-            return f"po-{m.group(1)}"
-        return t if t else np.nan
-    return s.apply(canon)
-
 def _abbr(n: float) -> str:
-    """
-    Formato corto para KPIs:
-    - 678987 => $679k
-    - 1_554_800 => $1.6M
-    - 3_100_000_000 => $3B
-    Reglas:
-      - 'k' sin decimales (compacto)
-      - 'M' y 'B' con 1 decimal, quitando .0 si aplica
-    """
+    """Format number to compact representation (e.g., 678987 → 679k)"""
     if n is None or (isinstance(n, float) and np.isnan(n)):
         return "$0"
     n = float(n)
     sign = "-" if n < 0 else ""
     n = abs(n)
-
-    def trim_decimal(x: float, digits: int = 1) -> str:
-        s = f"{x:.{digits}f}"
-        return s.rstrip("0").rstrip(".")
-
     if n >= 1_000_000_000:
-        val = trim_decimal(n / 1_000_000_000, 1) + "B"
+        val = f"{n/1_000_000_000:.1f}B"
     elif n >= 1_000_000:
-        val = trim_decimal(n / 1_000_000, 1) + "M"
+        val = f"{n/1_000_000:.1f}M"
     elif n >= 1_000:
         val = f"{n/1_000:.0f}k"
     else:
@@ -231,19 +201,16 @@ with st.sidebar:
         month_sel = None
 
 # ------------------------
-# KPI helper
+# KPI helper (MEJORADO: cuenta PO's ÚNICOS)
 # ------------------------
 def kpis(df: pd.DataFrame) -> Tuple[float, int, float]:
     rev = pd.to_numeric(df["total_revenue"], errors="coerce").fillna(0.0)
     prof = pd.to_numeric(df["profit"], errors="coerce").fillna(0.0)
     profit_pct = float((prof.sum() / rev.sum()) if rev.sum() else np.nan)
 
-    # Contar POs únicos (normalizados); si no hay `source`, fallback a #invoice únicos o filas
-    if "source" in df.columns and df["source"].notna().any():
-        uniq_pos = _canonical_po_series(df["source"]).dropna().unique()
-        orders = int(len(uniq_pos))
-    elif "invoice_num" in df.columns and df["invoice_num"].notna().any():
-        orders = int(pd.Series(df["invoice_num"]).nunique())
+    # Contar SOLO valores únicos de source (PO's únicos)
+    if "source" in df.columns and not df["source"].isna().all():
+        orders = int(df["source"].nunique())  # CAMBIO: .nunique() en lugar de .notna().sum()
     else:
         orders = int(len(df))
 
@@ -280,6 +247,7 @@ if view_mode == "Annual (by Month)":
     with c2:
         st.metric(f"#PO's  {this_year}", value=f"{cur_k[1]:,}")
     with c3:
+        # CAMBIO: usar _abbr() para formato compacto
         st.metric(f"Revenue  {this_year}", value=_abbr(cur_k[2]))
     with c4:
         st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month:.1f}%")
@@ -289,6 +257,7 @@ if view_mode == "Annual (by Month)":
         st.metric(f"#PO's  {prev_year}", value=f"{prv_k[1]:,}")
     s4 = st.columns([1])[0]
     with s4:
+        # CAMBIO: usar _abbr() para formato compacto
         st.metric(f"Revenue  {prev_year}", value=_abbr(prv_k[2]))
 
     # Build dataset for chart (side-by-side bars with labels)
@@ -306,7 +275,6 @@ if view_mode == "Annual (by Month)":
             xOffset=alt.XOffset("Year:N"),
             y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
             color=alt.Color("Year:N", scale=alt.Scale(domain=[str(prev_year), str(this_year)], range=["#1f77b4", "#ff7f0e"])),
-
             tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format="$,.0f")],
         ).properties(height=440)
 
@@ -366,6 +334,7 @@ else:
     with c2:
         st.metric(f"#PO's {month_map[month_sel]} {this_year}", value=f"{cur_k[1]:,}")
     with c3:
+        # CAMBIO: usar _abbr() para formato compacto
         st.metric(f"Revenue {month_map[month_sel]} {this_year}", value=_abbr(cur_k[2]))
     with c4:
         st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month:.1f}%")
@@ -378,6 +347,7 @@ else:
         st.metric(f"#PO's {month_map[month_sel]} {prev_year}", value=f"{prv_k[1]:,}")
     s4 = st.columns([1])[0]
     with s4:
+        # CAMBIO: usar _abbr() para formato compacto
         st.metric(f"Revenue {month_map[month_sel]} {prev_year}", value=_abbr(prv_k[2]))
 
     # Build dataset for chart (side-by-side bars with labels)
@@ -425,6 +395,6 @@ else:
 st.caption(
     "Notes: The page uses **reqs_date exclusively**. Rows without a valid reqs_date are dropped. "
     "Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). "
-    "#PO's counts unique normalized `source` values; if `source` is missing it falls back to unique invoices or row count. "
+    "#PO's counts UNIQUE `source` values; if `source` is missing it falls back to row count. "
     "Black line = average revenue reference; Green line = goal."
 )
