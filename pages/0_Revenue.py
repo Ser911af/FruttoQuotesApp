@@ -1,244 +1,364 @@
-# pages/0_Explorer.py
-import os
+import re
+from typing import Optional, Tuple
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Auth simple (asegúrate de tener simple_auth.py en la raíz del proyecto)
-from simple_auth import ensure_login, logout_button
-
-# Altair opcional (no rompe si no está instalado)
+# Optional deps
 try:
     import altair as alt
     ALTAIR_OK = True
 except Exception:
     ALTAIR_OK = False
 
-# ------------------------
-# FruttoFoods Explorer (Supabase)
-# ------------------------
-
-st.set_page_config(page_title="FruttoFoods Explorer", layout="wide")
-
-# ✅ Exigir login antes de cargar nada pesado
-user = ensure_login()   # detiene la página si no hay sesión
-# (Opcional) botón de salir aquí mismo
-with st.sidebar:
-    logout_button()
-
-LOGO_PATH   = "data/Asset 7@4x.png"
-BRAND_GREEN = "#8DC63F"
+try:
+    from supabase import create_client  # pip install supabase
+except Exception:
+    create_client = None
 
 # ------------------------
-# Supabase helpers (por secciones)
+# PAGE CONFIG
 # ------------------------
-def _read_section(section_name: str) -> dict:
-    """
-    Lee una sección de st.secrets (p.ej. 'supabase_quotes') y valida claves mínimas.
-    Estructura esperada:
-      [section]
-      url = "https://xxx.supabase.co"
-      anon_key = "eyJ..."
-      table = "quotations"
-      schema = "public"
-    """
-    try:
-        sec = st.secrets[section_name]
-    except Exception:
-        raise KeyError(f"No encontré la sección '{section_name}' en st.secrets.")
-    for k in ("url", "anon_key"):
-        if k not in sec or not str(sec[k]).strip():
-            raise KeyError(f"'{k}' ausente o vacío en st.secrets['{section_name}'].")
-    sec = dict(sec)
-    sec["table"]  = sec.get("table", "").strip() or "quotations"
-    sec["schema"] = sec.get("schema", "").strip() or "public"
-    return sec
+st.set_page_config(page_title="Revenue YoY • Months & Days", page_icon="📊", layout="wide")
+st.title("📊 Revenue YoY — by Month and by Day")
+st.caption(
+    "Compare total revenue Year-over-Year. Switch between **Annual (by Month)** and **Monthly (by Day)** views. KPI cards show Profit %, #Orders (count of `source` rows when available), and Total Revenue (short format) for current vs prior period."
+)
 
-def _create_client(url: str, key: str):
-    try:
-        from supabase import create_client
-    except Exception as e:
-        raise ImportError(f"Falta 'supabase' en requirements: {e}")
+# ------------------------
+# HELPERS
+# ------------------------
+
+def _normalize_txt(s: Optional[str]) -> str:
+    if s is None:
+        return ""
+    s = str(s).replace("\u00A0", " ")  # NBSP → space
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def _abbr(n: float) -> str:
+    if n is None or pd.isna(n):
+        return "$0"
+    n = float(n)
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000_000:
+        val = f"{n/1_000_000_000:.2f}B"
+    elif n >= 1_000_000:
+        val = f"{n/1_000_000:.2f}M"
+    elif n >= 1_000:
+        val = f"{n/1_000:.2f}K"
+    else:
+        val = f"{n:.0f}"
+    return f"{sign}${val}"
+
+
+def _fmt_dates(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    df = df.copy()
+    for c in cols:
+        if c in df.columns:
+            s = pd.to_datetime(df[c], errors="coerce")
+            df[c] = s.dt.strftime("%Y-%m-%d").fillna("")
+    return df
+
+
+def _styled_table(df_disp: pd.DataFrame, styles: dict) -> "pd.io.formats.style.Styler":
+    return df_disp.style.format(styles, na_rep="")
+
+
+def _load_supabase_client(secret_key: str):
+    sec = st.secrets.get(secret_key, None)
+    if not sec or not create_client:
+        return None
+    url = sec.get("url")
+    key = sec.get("anon_key")
+    if not url or not key:
+        return None
     return create_client(url, key)
 
-def _sb_table(sb, schema: str, table: str):
-    """Devuelve un handle a la tabla respetando el schema si el cliente lo soporta."""
-    try:
-        return sb.schema(schema).table(table)  # supabase-py v2+
-    except Exception:
-        return sb.table(table)                 # fallback v1
 
 # ------------------------
-# Fetch principal (usa [supabase_quotes])
+# DATA LOADER
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_quotations_from_supabase():
-    """Trae quotations paginado; ante errores devuelve DF vacío (no rompe UI)."""
-    try:
-        cfg = _read_section("supabase_quotes")
-        sb  = _create_client(cfg["url"], cfg["anon_key"])
-        tbl = _sb_table(sb, cfg["schema"], cfg["table"])
-    except Exception as e:
-        st.error(str(e))
+def load_sales() -> pd.DataFrame:
+    sb = _load_supabase_client("supabase_sales")
+    if sb:
+        table_name = st.secrets.get("supabase_sales", {}).get("table", "ventas_frutto")
+        rows, limit, offset = [], 1000, 0
+        while True:
+            q = sb.table(table_name).select("*").range(offset, offset + limit - 1).execute()
+            data = q.data or []
+            rows.extend(data)
+            got = len(data)
+            if got < limit:
+                break
+            offset += got
+        df = pd.DataFrame(rows)
+    else:
+        st.error("No sales source found (st.secrets['supabase_sales']).")
         return pd.DataFrame()
 
-    frames, page_size = [], 1000
-    for i in range(1000):
-        start, end = i*page_size, i*page_size + page_size - 1
-        try:
-            resp = (
-                tbl.select(
-                    "cotization_date,organic,product,price,location,"
-                    "volume_num,volume_unit,volume_standard,vendorclean"
-                )
-                .range(start, end)
-                .execute()
-            )
-        except Exception as e:
-            st.error(f"Error consultando Supabase: {e}")
-            return pd.DataFrame()
-
-        rows = getattr(resp, "data", None) or []
-        if not rows:
-            break
-        frames.append(pd.DataFrame(rows))
-        if len(rows) < page_size:
-            break
-
-    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if df.empty:
         return df
 
-    # Validación básica
-    needed = [
-        "cotization_date","organic","product","price","location",
-        "volume_num","volume_unit","volume_standard","vendorclean"
+    alias_map = {
+        # Dates
+        "reqs_date": ["reqs_date"],
+        "received_date": ["received_date"],
+        "created_at": ["created_at"],
+        # IDs
+        "invoice_num": ["invoice_num", "invoice #", "invoice"],
+        # Dimensions
+        "customer": ["customer", "customer_name", "client", "cliente"],
+        "product": ["product", "item", "item_name", "product_name", "desc", "description"],
+        # Metrics
+        "quantity": ["quantity", "qty"],
+        "total_revenue": ["total_revenue", "total", "line_total", "revenue", "t_revenue", "trevenue"],
+        # Optional profit & cost
+        "profit": ["profit", "gross_profit", "gp", "margin_amount"],
+        "total_cost": ["total_cost", "cost", "cogs"],
+        # Orders counter source (for #orders as requested)
+        "source": ["source", "po", "purchase_order", "sales_order", "order_ref"],
+    }
+
+    std = {}
+    for std_col, candidates in alias_map.items():
+        found = None
+        for c in candidates:
+            if c in df.columns:
+                found = c
+                break
+        std[std_col] = df[found] if found else pd.Series([None] * len(df))
+
+    sdf = pd.DataFrame(std)
+
+    # Types
+    for c in ["reqs_date", "received_date", "created_at"]:
+        sdf[c] = pd.to_datetime(sdf[c], errors="coerce")
+    for c in ["quantity", "total_revenue", "profit", "total_cost"]:
+        if c in sdf.columns:
+            sdf[c] = pd.to_numeric(sdf[c], errors="coerce")
+
+    # Unified date
+    sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"]).fillna(sdf["created_at"])  # fallback chain
+    sdf["date"] = pd.to_datetime(sdf["date"], errors="coerce")
+
+    # Derive profit if missing but cost present
+    if "profit" not in sdf.columns or sdf["profit"].isna().all():
+        if "total_cost" in sdf.columns and not sdf["total_cost"].isna().all():
+            sdf["profit"] = (sdf["total_revenue"] - sdf["total_cost"])  # may be NaN for rows
+        else:
+            sdf["profit"] = np.nan
+
+    # Profit % (row level) — safe division
+    sdf["profit_pct"] = np.where(
+        sdf["total_revenue"].abs() > 1e-9,
+        sdf["profit"] / sdf["total_revenue"],
+        np.nan,
+    )
+
+    # Orders proxy if `source` missing → fall back to row count
+    if "source" not in sdf.columns:
+        sdf["source"] = np.nan
+
+    return sdf
+
+
+# ------------------------
+# SIDEBAR
+# ------------------------
+with st.sidebar:
+    st.subheader("Controls")
+
+    # View mode
+    view_mode = st.radio("View", options=["Annual (by Month)", "Monthly (by Day)"], index=0)
+
+    # Year & Month pickers
+    today = pd.Timestamp.today().normalize()
+    years = sorted({d.year for d in pd.to_datetime(load_sales()["date"], errors="coerce").dropna()})
+    if not years:
+        years = [today.year]
+    current_year_default = max(years)
+
+    year_sel = st.selectbox("Year", options=years, index=years.index(current_year_default))
+    month_names = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
     ]
-    miss = [c for c in needed if c not in df.columns]
-    if miss:
-        st.error(f"Faltan columnas en Supabase: {miss}")
-        return pd.DataFrame()
+    month_map = {i+1: m for i, m in enumerate(month_names)}
 
-    # Normalización
-    df["cotization_date"] = pd.to_datetime(df["cotization_date"], errors="coerce")
-    df["Organic"] = pd.to_numeric(df["organic"], errors="coerce").astype("Int64")
-    df["Price"]   = pd.to_numeric(df["price"], errors="coerce")
-
-    # Filtra filas sin precio numérico
-    df = df.dropna(subset=["Price"])
-
-    vol_std = pd.to_numeric(df["volume_standard"], errors="coerce")
-    vol_num = pd.to_numeric(df["volume_num"], errors="coerce")
-    df["volume_standard"] = vol_std.fillna(vol_num).fillna(1)
-    df["volume_unit"]     = df["volume_unit"].astype(str).fillna("unit")
-    df["price_per_unit"]  = df["Price"] / df["volume_standard"]
-
-    df = df.rename(columns={
-        "product":"Product",
-        "location":"Location",
-        "vendorclean":"VendorClean"
-    })
-
-    # ✅ FIX: usar .str.upper() (antes era .upper())
-    df = df[~df["Price"].astype(str).str.upper().str.contains("PAS", na=False)]
-
-    df = df.sort_values("cotization_date", ascending=False)
-    return df
-
-# ---------- UI ----------
-df = fetch_all_quotations_from_supabase()
-
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.title("FruttoFoods Quotation Tool")
-    st.caption(f"Sesión: {user}")
-with col2:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=80)
+    if view_mode == "Monthly (by Day)":
+        month_sel_name = st.selectbox("Month", options=month_names, index=today.month - 1)
+        month_sel = month_names.index(month_sel_name) + 1
     else:
-        st.warning("Logo no encontrado en data/Asset 7@4x.png")
+        month_sel = None
+        month_sel_name = None
 
-st.sidebar.header("Quotation Filters")
-
-if df.empty:
-    st.sidebar.info("Sin datos disponibles desde Supabase.")
-    st.info("Sin datos para mostrar.")
+# ------------------------
+# DATA (filtered by period)
+# ------------------------
+sdf = load_sales()
+if sdf.empty:
     st.stop()
 
-# 1) Products
-all_products = sorted(df['Product'].dropna().unique().tolist())
-products = st.sidebar.multiselect("Products", options=all_products, default=all_products)
+sdf = sdf.dropna(subset=["date"])  # require valid date
+sdf["year"] = sdf["date"].dt.year
+sdf["month"] = sdf["date"].dt.month
+sdf["day"] = sdf["date"].dt.day
 
-# 2) Location
-locs_for_product = df[df['Product'].isin(products)]['Location'].dropna().unique()
-locs_for_product = sorted(locs_for_product.tolist())
-locations = st.sidebar.multiselect("Location", options=locs_for_product, default=locs_for_product)
+# Helper: aggregate KPI (profit %, #orders, total revenue) for a frame
 
-# 3) Organic
-sub = df[df['Product'].isin(products)]
-if locations:
-    sub = sub[sub['Location'].isin(locations)]
-org_vals = sorted([v for v in sub['Organic'].dropna().unique().tolist() if v in (0,1)])
-org_map  = {0:'Conventional', 1:'Organic'}
-org_options = ['All'] + [org_map[o] for o in org_vals]
-organic = st.sidebar.selectbox("Organic Status", org_options)
+def kpis(df: pd.DataFrame) -> Tuple[float, int, float]:
+    # Profit % — weighted by revenue
+    rev = pd.to_numeric(df["total_revenue"], errors="coerce").fillna(0)
+    prof = pd.to_numeric(df["profit"], errors="coerce").fillna(0)
+    profit_pct = float((prof.sum() / rev.sum()) if rev.sum() else np.nan)
 
-# 4) Volume Unit
-sub2 = sub.copy()
-if organic != 'All':
-    sub2 = sub2[sub2['Organic'] == (0 if organic=='Conventional' else 1)]
-vu_opts = sorted([v for v in sub2['volume_unit'].dropna().unique().tolist() if v])
-volume_unit = st.sidebar.selectbox("Volume Unit", ['All'] + vu_opts)
-
-# Filtros
-g = df[df['Product'].isin(products)] if products else df.copy()
-if locations:
-    g = g[g['Location'].isin(locations)]
-if organic != 'All':
-    g = g[g['Organic'] == (0 if organic=='Conventional' else 1)]
-if volume_unit != 'All':
-    g = g[g['volume_unit'] == volume_unit]
-
-# Tabla
-if g.empty:
-    st.warning("No hay datos para los filtros seleccionados.")
-else:
-    display = g.rename(columns={
-        'cotization_date': 'Date',
-        'volume_unit': 'Volume Unit',
-        'price_per_unit': 'Price per Unit',
-        'VendorClean': 'Vendor'
-    })[['Date','Product','Location','Volume Unit','Price per Unit','Vendor']]
-
-    display['Date'] = pd.to_datetime(display['Date'], errors='coerce')
-    display = display.sort_values(by=['Date'], ascending=[False])
-    display['Date'] = display['Date'].dt.strftime("%m/%d/%Y")
-    display['Price per Unit'] = display['Price per Unit'].map(lambda x: f"${x:.2f}")
-
-    st.subheader("Filtered Quotations")
-    st.dataframe(display, use_container_width=True)
-
-    # Métricas
-    st.subheader("Key Metrics")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Min Price/Unit", f"${g['price_per_unit'].min():.2f}")
-    c2.metric("Max Price/Unit", f"${g['price_per_unit'].max():.2f}")
-    c3.metric("Avg Price/Unit", f"${g['price_per_unit'].mean():.2f}")
-
-    # Chart
-    st.subheader("Average Price/Unit by Vendor")
-    if not g['VendorClean'].dropna().empty:
-        avg_vendor = g.groupby('VendorClean', dropna=True)['price_per_unit'].mean().reset_index()
-        if not avg_vendor.empty and ALTAIR_OK:
-            chart = alt.Chart(avg_vendor).mark_bar(color=BRAND_GREEN).encode(
-                x=alt.X('VendorClean:N', title='Vendor', sort='-y'),
-                y=alt.Y('price_per_unit:Q', title='Avg Price/Unit')
-            )
-            st.altair_chart(chart, use_container_width=True)
-            best = avg_vendor.loc[avg_vendor['price_per_unit'].idxmin()]
-            st.success(f"**Vendor recomendado:** {best['VendorClean']} a ${best['price_per_unit']:.2f} por unidad")
-        elif not ALTAIR_OK:
-            st.info("Altair no está instalado; omitiendo gráfico.")
-        else:
-            st.info("No hay datos agregables por Vendor con los filtros actuales.")
+    # #Orders — count of `source` records when available else rows
+    if "source" in df.columns and not df["source"].isna().all():
+        orders = int(df["source"].notna().sum())
     else:
-        st.info("No hay Vendors en el conjunto filtrado.")
+        orders = int(len(df))
+
+    total_rev = float(rev.sum())
+    return profit_pct, orders, total_rev
+
+
+# ------------------------
+# ANNUAL (BY MONTH) VIEW
+# ------------------------
+if view_mode == "Annual (by Month)":
+    this_year = year_sel
+    prev_year = year_sel - 1
+
+    cur = sdf[sdf["year"] == this_year]
+    prv = sdf[sdf["year"] == prev_year]
+
+    # month aggregates
+    def agg_month(df):
+        return (
+            df.groupby("month").agg(
+                revenue=("total_revenue", "sum")
+            ).reset_index()
+        )
+
+    cur_m = agg_month(cur)
+    prv_m = agg_month(prv)
+
+    # KPIs
+    cur_k = kpis(cur)
+    prv_k = kpis(prv)
+
+    # KPI cards (two rows)
+    c1, c2, c3, s1, s2, s3 = st.columns([1,1,1,0.2,1,1])
+    with c1:
+        st.metric("%  {0}".format(this_year), value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
+    with c2:
+        st.metric("#PO's  {0}".format(this_year), value=f"{cur_k[1]:,}")
+    with c3:
+        st.metric("Revenue  {0}".format(this_year), value=_abbr(cur_k[2]))
+    with s2:
+        st.metric("%  {0}".format(prev_year), value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
+    with s3:
+        st.metric("#PO's  {0}".format(prev_year), value=f"{prv_k[1]:,}")
+    s4 = st.columns([1])[0]
+    with s4:
+        st.metric("Revenue  {0}".format(prev_year), value=_abbr(prv_k[2]))
+
+    # Build dataset for chart
+    cur_m["Year"] = str(this_year)
+    prv_m["Year"] = str(prev_year)
+    allm = pd.concat([cur_m, prv_m], ignore_index=True)
+    allm["Month"] = allm["month"].map({i: n for i, n in enumerate(month_names, start=1)})
+
+    if ALTAIR_OK:
+        mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()
+        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
+        base = alt.Chart(allm).mark_bar().encode(
+            x=alt.X("Month:N", sort=list(month_names)),
+            y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
+            color=alt.Color("Year:N", scale=alt.Scale(scheme="category10")),
+            tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format=",.0f")],
+        ).properties(height=440)
+        st.altair_chart(base + rule, use_container_width=True)
+
+    # Detail table
+    st.subheader("Monthly totals")
+    disp = allm.pivot_table(index="Month", columns="Year", values="revenue", aggfunc="sum").reindex(month_names)
+    st.dataframe(_styled_table(disp.reset_index().rename(columns={"index": "Month"}), {str(this_year): "${:,.0f}", str(prev_year): "${:,.0f}"}), use_container_width=True, hide_index=True)
+
+
+# ------------------------
+# MONTHLY (BY DAY) VIEW
+# ------------------------
+else:
+    assert month_sel is not None
+    this_year = year_sel
+    prev_year = year_sel - 1
+
+    cur = sdf[(sdf["year"] == this_year) & (sdf["month"] == month_sel)]
+    prv = sdf[(sdf["year"] == prev_year) & (sdf["month"] == month_sel)]
+
+    # day aggregates
+    def agg_day(df):
+        return (
+            df.groupby("day").agg(
+                revenue=("total_revenue", "sum")
+            ).reset_index()
+        )
+
+    cur_d = agg_day(cur)
+    prv_d = agg_day(prv)
+
+    # KPIs (restrict to the chosen month)
+    cur_k = kpis(cur)
+    prv_k = kpis(prv)
+
+    # KPI cards
+    c1, c2, c3, s1, s2, s3 = st.columns([1,1,1,0.2,1,1])
+    with c1:
+        st.metric(f"% {month_map[month_sel]} {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
+    with c2:
+        st.metric(f"#PO's {month_map[month_sel]} {this_year}", value=f"{cur_k[1]:,}")
+    with c3:
+        st.metric(f"Revenue {month_map[month_sel]} {this_year}", value=_abbr(cur_k[2]))
+    with s2:
+        st.metric(f"% {month_map[month_sel]} {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
+    with s3:
+        st.metric(f"#PO's {month_map[month_sel]} {prev_year}", value=f"{prv_k[1]:,}")
+    s4 = st.columns([1])[0]
+    with s4:
+        st.metric(f"Revenue {month_map[month_sel]} {prev_year}", value=_abbr(prv_k[2]))
+
+    # Build dataset for chart
+    cur_d["Year"] = str(this_year)
+    prv_d["Year"] = str(prev_year)
+    alld = pd.concat([cur_d, prv_d], ignore_index=True)
+
+    if ALTAIR_OK:
+        mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()
+        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4]).encode(y="y:Q")
+        base = alt.Chart(alld).mark_bar().encode(
+            x=alt.X("day:O", title="Day"),
+            y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
+            color=alt.Color("Year:N", scale=alt.Scale(scheme="category10")),
+            tooltip=["Year", "day", alt.Tooltip("revenue:Q", title="Revenue", format=",.0f")],
+        ).properties(height=440)
+        st.altair_chart(base + rule, use_container_width=True)
+
+    # Detail table
+    st.subheader("Daily totals")
+    disp = alld.pivot_table(index="day", columns="Year", values="revenue", aggfunc="sum").sort_index()
+    st.dataframe(_styled_table(disp.reset_index().rename(columns={"day": "Day"}), {str(this_year): "${:,.0f}", str(prev_year): "${:,.0f}"}), use_container_width=True, hide_index=True)
+
+
+# ------------------------
+# NOTES
+# ------------------------
+st.caption(
+    "Notes: Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). #PO's counts non-null `source` rows; if `source` is missing it falls back to total rows in the period."
+)
