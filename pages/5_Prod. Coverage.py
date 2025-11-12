@@ -22,7 +22,7 @@ except Exception:
 # ------------------------
 st.set_page_config(page_title="Commodity • Organic • Location → Vendors", page_icon="🧾", layout="wide")
 st.title("🧾 Commodity • Organic • Location → Vendors")
-st.caption("Filtra por *commodity*, si es *orgánico* y por *location*. Luego elige un vendor para ver qué productos ha vendido y cuántas facturas por producto.")
+st.caption("Filtra por *commodity*, si es *orgánico*, *location*, **vendor** y **customer**. Luego elige un vendor para ver qué productos ha vendido y cuántas facturas por producto.")
 
 # ------------------------
 # HELPERS
@@ -191,14 +191,25 @@ sdf_f = sdf[mask].copy()
 
 # Dropdowns based on filtered window
 with st.sidebar:
+    # Commodity filter with "All"
     comm_opts = ["All"] + sorted(sdf_f["commodity_disp"].dropna().unique().tolist())
     commodity_sel = st.selectbox("Commodity", options=comm_opts, index=0)
 
+    # Organic selector
     org_opts = ["All", "Organic", "Conventional"]
     org_sel = st.selectbox("Organic?", options=org_opts, index=0)
 
-    loc_opts = [""] + sorted(sdf_f["location_disp"].dropna().unique().tolist())
-    loc_sel = st.selectbox("Location", options=loc_opts, index=0, placeholder="Select...")
+    # Location filter (allow All)
+    loc_opts = ["All"] + sorted(sdf_f["location_disp"].dropna().unique().tolist())
+    loc_sel = st.selectbox("Location", options=loc_opts, index=0)
+
+    # NEW: Vendor filter (allow All)
+    vend_opts = ["All"] + sorted(sdf_f["vendor_disp"].dropna().unique().tolist())
+    vendor_f_sel = st.selectbox("Vendor (filter)", options=vend_opts, index=0)
+
+    # NEW: Customer filter (allow All)
+    cust_opts = ["All"] + sorted(sdf_f["customer_disp"].dropna().unique().tolist())
+    customer_f_sel = st.selectbox("Customer (filter)", options=cust_opts, index=0)
 
 # Apply filters
 if commodity_sel != "All":
@@ -209,11 +220,21 @@ if org_sel != "All":
     want_org = (org_sel == "Organic")
     sdf_f = sdf_f[sdf_f["is_organic_bool"] == want_org]
 
-if loc_sel:
+if loc_sel != "All":
     loc_norm = _normalize_txt(loc_sel)
     sdf_f = sdf_f[sdf_f["location_c"] == loc_norm]
 
-st.caption(f"Rows after filters: **{len(sdf_f)}** | Vendors: **{sdf_f['vendor_c'].nunique()}** | Products: **{sdf_f['product_c'].nunique()}**")
+if vendor_f_sel != "All":
+    vend_norm_f = _normalize_txt(vendor_f_sel)
+    sdf_f = sdf_f[sdf_f["vendor_c"] == vend_norm_f]
+
+if customer_f_sel != "All":
+    cust_norm_f = _normalize_txt(customer_f_sel)
+    sdf_f = sdf_f[sdf_f["customer_c"] == cust_norm_f]
+
+st.caption(
+    f"Rows after filters: **{len(sdf_f)}** | Vendors: **{sdf_f['vendor_c'].nunique()}** | Customers: **{sdf_f['customer_c'].nunique()}** | Products: **{sdf_f['product_c'].nunique()}**"
+)
 
 if sdf_f.empty:
     st.warning("No hay datos para esos filtros / rango.")
@@ -245,8 +266,8 @@ with left:
     )
 
 with right:
-    vend_opts = [""] + vend_summary["Vendor"].tolist()
-    vendor_sel = st.selectbox("Elige un vendor para detallar productos", options=vend_opts, index=0, placeholder="Select...")
+    vend_opts_sel = [""] + vend_summary["Vendor"].tolist()
+    vendor_sel = st.selectbox("Elige un vendor para detallar productos", options=vend_opts_sel, index=0, placeholder="Select...")
 
 if not vendor_sel:
     st.info("Selecciona un vendor para ver productos e invoices.")
