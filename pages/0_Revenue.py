@@ -5,6 +5,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ========================
+# TARGETS (Goals)
+# ========================
+MONTHLY_GOAL = 3_180_000   # $3.18M per month
+DAILY_GOAL   = 138_260     # $138.26K per day
+
 # Optional deps
 try:
     import altair as alt
@@ -253,14 +259,19 @@ if view_mode == "Annual (by Month)":
     cur_k = kpis(cur)
     prv_k = kpis(prv)
 
-    # KPI cards (two rows)
-    c1, c2, c3, s1, s2, s3 = st.columns([1,1,1,0.2,1,1])
+    # Goal progress (annual view uses monthly goal context)
+    avg_month_cur = float(cur_m["revenue"].mean()) if not cur_m.empty else 0.0
+    pct_goal_avg_month = (avg_month_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
+
+    c1, c2, c3, c4, s1, s2, s3 = st.columns([1,1,1,1,0.2,1,1])
     with c1:
         st.metric("%  {0}".format(this_year), value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
     with c2:
         st.metric("#PO's  {0}".format(this_year), value=f"{cur_k[1]:,}")
     with c3:
         st.metric("Revenue  {0}".format(this_year), value=_abbr(cur_k[2]))
+    with c4:
+        st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month:.1f}%")
     with s2:
         st.metric("%  {0}".format(prev_year), value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
     with s3:
@@ -280,16 +291,15 @@ if view_mode == "Annual (by Month)":
 
     if ALTAIR_OK:
         mean_line = allm[allm["Year"] == str(this_year)]["revenue"].mean()
-        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4], color="#000").encode(y="y:Q")
+        mean_rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4], color="#000").encode(y="y:Q")
+        goal_rule = alt.Chart(pd.DataFrame({"y": [MONTHLY_GOAL]})).mark_rule(strokeDash=[4,4], color="green").encode(y="y:Q")
 
-        base = alt.Chart(allm).transform_calculate(
-            xoff="datum.Year === '"+str(this_year)+"' ? -0.15 : 0.15"
-        ).mark_bar().encode(
+        base = alt.Chart(allm).mark_bar().encode(
             x=alt.X("Month:N", sort=list(month_names)),
             xOffset=alt.XOffset("Year:N"),
             y=alt.Y("revenue:Q", title="Sum of Total Revenue"),
             color=alt.Color("Year:N", scale=alt.Scale(domain=[str(prev_year), str(this_year)], range=["#1f77b4", "#ff7f0e"])),
-            tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format="$,.0f")],
+            tooltip=["Year", "Month", alt.Tooltip("revenue:Q", title="Revenue", format="$,.0f"), alt.Tooltip("Year:N")],
         ).properties(height=440)
 
         labels = alt.Chart(allm).mark_text(dy=-6, size=11).encode(
@@ -300,7 +310,7 @@ if view_mode == "Annual (by Month)":
             text=alt.Text("revenue:Q", format="$,.2s"),
             color=alt.value("black")
         )
-        st.altair_chart(base + labels + rule, use_container_width=True)
+        st.altair_chart(base + labels + mean_rule + goal_rule, use_container_width=True)
 
     # Detail table
     st.subheader("Monthly totals")
@@ -334,14 +344,25 @@ else:
     cur_k = kpis(cur)
     prv_k = kpis(prv)
 
+    # Goal progress within month
+    month_total_cur = float(cur_d["revenue"].sum() if not cur_d.empty else 0.0)
+    pct_goal_month = (month_total_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
+    avg_day_cur = float(cur_d["revenue"].mean() if not cur_d.empty else 0.0)
+    pct_goal_day = (avg_day_cur / DAILY_GOAL * 100.0) if DAILY_GOAL else np.nan
+
     # KPI cards
-    c1, c2, c3, s1, s2, s3 = st.columns([1,1,1,0.2,1,1])
+    c1, c2, c3, c4, c5, s1, s2, s3 = st.columns([1,1,1,1,1,0.2,1,1])
     with c1:
         st.metric(f"% {month_map[month_sel]} {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
     with c2:
         st.metric(f"#PO's {month_map[month_sel]} {this_year}", value=f"{cur_k[1]:,}")
     with c3:
         st.metric(f"Revenue {month_map[month_sel]} {this_year}", value=_abbr(cur_k[2]))
+    with c4:
+        st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month:.1f}%")
+    with c5:
+        st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day:.1f}%")
+
     with s2:
         st.metric(f"% {month_map[month_sel]} {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
     with s3:
@@ -356,7 +377,8 @@ else:
 
     if ALTAIR_OK:
         mean_line = alld[alld["Year"] == str(this_year)]["revenue"].mean()
-        rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4], color="#000").encode(y="y:Q")
+        mean_rule = alt.Chart(pd.DataFrame({"y": [mean_line]})).mark_rule(strokeDash=[6,4], color="#000").encode(y="y:Q")
+        goal_rule = alt.Chart(pd.DataFrame({"y": [DAILY_GOAL]})).mark_rule(strokeDash=[4,4], color="green").encode(y="y:Q")
 
         base = alt.Chart(alld).mark_bar().encode(
             x=alt.X("day:O", title="Day"),
@@ -374,7 +396,7 @@ else:
             text=alt.Text("revenue:Q", format="$,.2s"),
             color=alt.value("black")
         )
-        st.altair_chart(base + labels + rule, use_container_width=True)
+        st.altair_chart(base + labels + mean_rule + goal_rule, use_container_width=True)
 
     # Detail table
     st.subheader("Daily totals")
