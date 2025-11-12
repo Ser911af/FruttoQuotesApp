@@ -20,9 +20,11 @@ except Exception:
 # ------------------------
 # PAGE CONFIG
 # ------------------------
-st.set_page_config(page_title="Commodity • Organic • Location → Vendors", page_icon="🧾", layout="wide")
-st.title("🧾 Commodity • Organic • Location → Vendors")
-st.caption("Filtra por *commodity*, si es *orgánico*, *location*, **vendor** y **customer**. Luego elige un vendor para ver qué productos ha vendido y cuántas facturas por producto.")
+st.set_page_config(page_title="Filters → (Vendors or Customers)", page_icon="🧾", layout="wide")
+st.title("🧾 Commodity • Organic • Location → Vendors or Customers")
+st.caption(
+    "Filter by *commodity*, *organic* flag, *location*, and date range. Then choose whether to analyze **Vendors** or **Customers**. Pick one to see purchased products with metrics (Invoices, Units, Revenue)."
+)
 
 # ------------------------
 # HELPERS
@@ -31,7 +33,7 @@ st.caption("Filtra por *commodity*, si es *orgánico*, *location*, **vendor** y 
 def _normalize_txt(s: Optional[str]) -> str:
     if s is None:
         return ""
-    s = str(s).replace("\u00A0", " ")  # NBSP -> space
+    s = str(s).replace("\u00A0", " ")  # NBSP → space
     s = s.strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
@@ -102,7 +104,7 @@ def load_sales() -> pd.DataFrame:
         ],
         "commodity": ["commodity", "comodity", "commoditie", "cooditie", "category", "family", "product_group"],
         "lot_location": ["lot_location", "location", "lot", "loc"],
-        # Optional organic flag (will also infer from text)
+        # Optional organic flag (we will also infer from text)
         "is_organic": ["is_organic", "organic", "og", "bio", "is_og", "organico", "org"],
         # Metrics
         "quantity": ["quantity", "qty"],
@@ -152,10 +154,7 @@ def load_sales() -> pd.DataFrame:
             return True
         if v in {"false", "f", "0", "no", "n"}:
             return False
-        txt = " ".join([
-            str(row.get("product", "")),
-            str(row.get("commodity", ""))
-        ]).lower()
+        txt = " ".join([str(row.get("product", "")), str(row.get("commodity", ""))]).lower()
         return any(k in txt for k in ["organic", "org.", "og ", " og", "bio", "org-", "org/"])
 
     sdf["is_organic_bool"] = sdf.apply(infer_organic, axis=1)
@@ -166,8 +165,9 @@ def load_sales() -> pd.DataFrame:
 # SIDEBAR FILTERS
 # ------------------------
 with st.sidebar:
-    st.subheader("Filtros")
+    st.subheader("Filters")
 
+    # Date range
     today_bo = pd.Timestamp.now(tz="America/Bogota").normalize()
     default_start = (today_bo - pd.Timedelta(days=30)).tz_localize(None)
     default_end = today_bo.tz_localize(None)
@@ -175,7 +175,7 @@ with st.sidebar:
     date_range = st.date_input("Date range", value=(default_start, default_end))
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date = pd.Timestamp(date_range[0])
-        end_date = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)
+        end_date = pd.Timestamp(date_range[1]) + pd.Timedelta(days=1)  # end exclusive
     else:
         start_date, end_date = default_start, default_end + pd.Timedelta(days=1)
 
@@ -191,6 +191,9 @@ sdf_f = sdf[mask].copy()
 
 # Dropdowns based on filtered window
 with st.sidebar:
+    # Scope toggle: analyze Vendors or Customers
+    scope = st.radio("Analyze", options=["Vendors", "Customers"], index=0, horizontal=True)
+
     # Commodity filter with "All"
     comm_opts = ["All"] + sorted(sdf_f["commodity_disp"].dropna().unique().tolist())
     commodity_sel = st.selectbox("Commodity", options=comm_opts, index=0)
@@ -203,13 +206,13 @@ with st.sidebar:
     loc_opts = ["All"] + sorted(sdf_f["location_disp"].dropna().unique().tolist())
     loc_sel = st.selectbox("Location", options=loc_opts, index=0)
 
-    # NEW: Vendor filter (allow All)
-    vend_opts = ["All"] + sorted(sdf_f["vendor_disp"].dropna().unique().tolist())
-    vendor_f_sel = st.selectbox("Vendor (filter)", options=vend_opts, index=0)
-
-    # NEW: Customer filter (allow All)
-    cust_opts = ["All"] + sorted(sdf_f["customer_disp"].dropna().unique().tolist())
-    customer_f_sel = st.selectbox("Customer (filter)", options=cust_opts, index=0)
+    # Optional pre-filter by specific Vendor or Customer (both with All)
+    if scope == "Vendors":
+        base_opts = ["All"] + sorted(sdf_f["vendor_disp"].dropna().unique().tolist())
+        base_sel = st.selectbox("Vendor (filter)", options=base_opts, index=0)
+    else:
+        base_opts = ["All"] + sorted(sdf_f["customer_disp"].dropna().unique().tolist())
+        base_sel = st.selectbox("Customer (filter)", options=base_opts, index=0)
 
 # Apply filters
 if commodity_sel != "All":
@@ -224,62 +227,74 @@ if loc_sel != "All":
     loc_norm = _normalize_txt(loc_sel)
     sdf_f = sdf_f[sdf_f["location_c"] == loc_norm]
 
-if vendor_f_sel != "All":
-    vend_norm_f = _normalize_txt(vendor_f_sel)
-    sdf_f = sdf_f[sdf_f["vendor_c"] == vend_norm_f]
+if base_sel != "All":
+    base_norm = _normalize_txt(base_sel)
+    key = "vendor_c" if scope == "Vendors" else "customer_c"
+    sdf_f = sdf_f[sdf_f[key] == base_norm]
 
-if customer_f_sel != "All":
-    cust_norm_f = _normalize_txt(customer_f_sel)
-    sdf_f = sdf_f[sdf_f["customer_c"] == cust_norm_f]
-
+# KPI line
 st.caption(
-    f"Rows after filters: **{len(sdf_f)}** | Vendors: **{sdf_f['vendor_c'].nunique()}** | Customers: **{sdf_f['customer_c'].nunique()}** | Products: **{sdf_f['product_c'].nunique()}**"
+    f"Rows: **{len(sdf_f)}** | Vendors: **{sdf_f['vendor_c'].nunique()}** | Customers: **{sdf_f['customer_c'].nunique()}** | Products: **{sdf_f['product_c'].nunique()}**"
 )
 
 if sdf_f.empty:
-    st.warning("No hay datos para esos filtros / rango.")
+    st.warning("No data for those filters / date range.")
     st.stop()
 
 # ------------------------
-# VENDOR LIST + SELECTION
+# ENTITY LIST + SELECTION (Vendors or Customers)
 # ------------------------
-if sdf_f["order_id"].notna().any():
-    vend_summary = sdf_f.groupby("vendor_c").agg(
-        Vendor=("vendor_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
-        Invoices=("order_id", "nunique"),
-        Products=("product_c", "nunique"),
-    ).reset_index(drop=True).sort_values("Invoices", ascending=False)
+if scope == "Vendors":
+    group_key = "vendor_c"
+    label_col = "vendor_disp"
+    label_name = "Vendor"
 else:
-    vend_summary = sdf_f.groupby("vendor_c").agg(
-        Vendor=("vendor_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
-        Invoices=("product_c", "count"),
-        Products=("product_c", "nunique"),
-    ).reset_index(drop=True).sort_values("Invoices", ascending=False)
+    group_key = "customer_c"
+    label_col = "customer_disp"
+    label_name = "Customer"
+
+if sdf_f["order_id"].notna().any():
+    ent_summary = (
+        sdf_f.groupby(group_key).agg(
+            Entity=(label_col, lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+            Invoices=("order_id", "nunique"),
+            Products=("product_c", "nunique"),
+        ).reset_index(drop=True).sort_values(["Invoices", "Products"], ascending=[False, False])
+    )
+else:
+    ent_summary = (
+        sdf_f.groupby(group_key).agg(
+            Entity=(label_col, lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
+            Invoices=("product_c", "count"),  # row proxy
+            Products=("product_c", "nunique"),
+        ).reset_index(drop=True).sort_values(["Invoices", "Products"], ascending=[False, False])
+    )
 
 left, right = st.columns([1, 1])
 with left:
-    st.subheader("🏷️ Vendors (según filtros)")
+    st.subheader(f"🏷️ {label_name}s (by filters)")
     st.dataframe(
-        _styled_table(vend_summary, {"Invoices": "{:,.0f}", "Products": "{:,.0f}"}),
+        _styled_table(ent_summary, {"Invoices": "{:,.0f}", "Products": "{:,.0f}"}),
         use_container_width=True,
         hide_index=True,
     )
 
 with right:
-    vend_opts_sel = [""] + vend_summary["Vendor"].tolist()
-    vendor_sel = st.selectbox("Elige un vendor para detallar productos", options=vend_opts_sel, index=0, placeholder="Select...")
+    ent_opts = [""] + ent_summary["Entity"].tolist()
+    ent_sel = st.selectbox(f"Pick a {label_name.lower()} to detail products", options=ent_opts, index=0, placeholder="Select...")
 
-if not vendor_sel:
-    st.info("Selecciona un vendor para ver productos e invoices.")
+if not ent_sel:
+    st.info(f"Select a {label_name.lower()} to see products and invoices.")
     st.stop()
 
-vend_norm = _normalize_txt(vendor_sel)
-vslice = sdf_f[sdf_f["vendor_c"] == vend_norm].copy()
+ent_norm = _normalize_txt(ent_sel)
+key = "vendor_c" if scope == "Vendors" else "customer_c"
+vslice = sdf_f[sdf_f[key] == ent_norm].copy()
 
 # ------------------------
-# PRODUCT → COUNT(Invoice) for selected vendor
+# PRODUCT → COUNT(Invoice) for selected entity
 # ------------------------
-st.subheader(f"🧺 Productos comprados a {vendor_sel}")
+st.subheader(f"🧺 Products sold to {ent_sel if scope == 'Customers' else 'from ' + ent_sel}")
 
 if vslice["order_id"].notna().any():
     prod_pvt = (
@@ -294,7 +309,7 @@ else:
     prod_pvt = (
         vslice.groupby("product_c").agg(
             Product=("product_disp", lambda s: s.dropna().iloc[0] if len(s.dropna()) else ""),
-            Invoices=("product_c", "count"),
+            Invoices=("product_c", "count"),  # row proxy
             Units=("quantity", "sum"),
             Revenue=("total_revenue", "sum"),
         ).reset_index(drop=True)
@@ -308,6 +323,7 @@ st.dataframe(
     hide_index=True,
 )
 
+# Optional chart
 if ALTAIR_OK and len(prod_pvt) > 0:
     chart = alt.Chart(prod_pvt.head(25)).mark_bar().encode(
         x=alt.X("Invoices:Q", title="Count of Invoice #"),
@@ -319,8 +335,8 @@ if ALTAIR_OK and len(prod_pvt) > 0:
 # ------------------------
 # EXPORTS
 # ------------------------
-vend_csv = vend_summary.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Vendors (resumen)", data=vend_csv, file_name="vendors_by_filters.csv", mime="text/csv")
+summary_csv = ent_summary.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Summary (entities)", data=summary_csv, file_name=f"{scope.lower()}_by_filters.csv", mime="text/csv")
 
-prod_csv = prod_pvt.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Productos por vendor", data=prod_csv, file_name=f"products_by_vendor_{vend_norm or 'all'}.csv", mime="text/csv")
+detail_csv = prod_pvt.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Products by entity", data=detail_csv, file_name=f"products_by_{scope.lower()}_{ent_norm or 'all'}.csv", mime="text/csv")
