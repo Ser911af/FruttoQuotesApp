@@ -1,7 +1,3 @@
-# Vendor × Product → Customers — Who bought what from whom?
-# Streamlit page to answer: "qué clientes han comprado de ese vendor y ese producto en específico"
-# Author: Sergio + Copiloto (con cafeína y pandas)
-
 import re
 import math
 from typing import Optional
@@ -25,9 +21,9 @@ except Exception:
 # ------------------------
 # PAGE CONFIG
 # ------------------------
-st.set_page_config(page_title="Vendor × Product → Customers", page_icon="🧾", layout="wide")
-st.title("🧾 Vendor × Product → Customers")
-st.caption("Encuentra qué clientes compraron un *producto específico* de un *vendor* dado, con métricas y detalle.")
+st.set_page_config(page_title="Vendor × Commodity → Customers", page_icon="🧾", layout="wide")
+st.title("🧾 Vendor × Commodity → Customers")
+st.caption("Encuentra qué clientes compraron una *commodity específica* de un *vendor* dado, con métricas y detalle.")
 
 # ------------------------
 # HELPERS
@@ -84,7 +80,7 @@ def _load_supabase_client(secret_key: str):
 
 
 # ------------------------
-# SALES LOADER (extends alias map with product fields)
+# SALES LOADER (extends alias map with product + commodity fields)
 # ------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def load_sales() -> pd.DataFrame:
@@ -124,6 +120,8 @@ def load_sales() -> pd.DataFrame:
             "product", "item", "item_name", "product_name", "desc", "description",
             "sku", "upc", "gtin"
         ],
+        # NEW: commodity (includes common typos / synonyms)
+        "commodity": ["commodity", "comodity", "commoditie", "cooditie", "category", "family", "product_group"],
         "lot_location": ["lot_location"],
         # Metrics
         "quantity": ["quantity", "qty"],
@@ -152,11 +150,13 @@ def load_sales() -> pd.DataFrame:
     sdf["vendor_c"] = sdf["vendor"].astype(str).map(_normalize_txt)
     sdf["product_c"] = sdf["product"].astype(str).map(_normalize_txt)
     sdf["customer_c"] = sdf["customer"].astype(str).map(_normalize_txt)
+    sdf["commodity_c"] = sdf["commodity"].astype(str).map(_normalize_txt)
 
     # Display labels (Title Case)
     sdf["vendor_disp"] = sdf["vendor"].astype(str).str.title()
     sdf["product_disp"] = sdf["product"].astype(str)
     sdf["customer_disp"] = sdf["customer"].astype(str).str.title()
+    sdf["commodity_disp"] = sdf["commodity"].astype(str).str.title()
 
     # Unified date
     sdf["date"] = sdf["received_date"].fillna(sdf["reqs_date"]).fillna(sdf["created_at"])  # fallback chain
@@ -185,7 +185,7 @@ with st.sidebar:
     else:
         start_date, end_date = default_start, default_end + pd.Timedelta(days=1)
 
-    st.caption("Primero el vendor, luego el producto — como tacos y salsa.")
+    st.caption("Primero el vendor, luego la commodity — como tacos y salsa.")
 
 # Adaptive as_of_date
 today_norm = pd.Timestamp.now(tz="America/Bogota").normalize().tz_localize(None)
@@ -204,7 +204,7 @@ with m1:
 with m2:
     st.metric("Unique vendors", value=int(sdf["vendor_c"].nunique()) if not sdf.empty else 0)
 with m3:
-    st.metric("Unique products", value=int(sdf["product_c"].nunique()) if not sdf.empty else 0)
+    st.metric("Unique commodities", value=int(sdf["commodity_c"].nunique()) if not sdf.empty else 0)
 with m4:
     st.metric("Unique customers", value=int(sdf["customer_c"].nunique()) if not sdf.empty else 0)
 
@@ -219,7 +219,7 @@ if sdf_f.empty:
     st.stop()
 
 # ------------------------
-# UI: VENDOR → PRODUCT selectors (dependent)
+# UI: VENDOR → COMMODITY selectors (dependent)
 # ------------------------
 left, right = st.columns([1, 1])
 with left:
@@ -233,33 +233,35 @@ if vendor_sel_disp:
         else _normalize_txt(vendor_sel_disp)
     )
     vmask = sdf_f["vendor_c"] == vendor_norm
-    prods = sdf_f.loc[vmask, ["product_c", "product_disp"]].dropna().drop_duplicates()
-    # Keep product_disp as is (no Title Case; could be SKU-like)
-    prod_opts = [""] + sorted(prods["product_disp"].astype(str).unique().tolist())
-    with right:
-        product_sel_disp = st.selectbox("Product (de ese Vendor)", options=prod_opts, index=0, placeholder="Select...")
-else:
-    product_sel_disp = ""
 
-if not vendor_sel_disp or not product_sel_disp:
-    st.info("Selecciona un **Vendor** y un **Product** para ver los clientes.")
+    # List of commodities available for that vendor
+    comms = sdf_f.loc[vmask, ["commodity_c", "commodity_disp"]].dropna().drop_duplicates()
+    comm_opts = [""] + sorted(comms["commodity_disp"].astype(str).unique().tolist())
+
+    with right:
+        commodity_sel_disp = st.selectbox("Commodity (de ese Vendor)", options=comm_opts, index=0, placeholder="Select...")
+else:
+    commodity_sel_disp = ""
+
+if not vendor_sel_disp or not commodity_sel_disp:
+    st.info("Selecciona un **Vendor** y una **Commodity** para ver los clientes.")
     st.stop()
 
-# Canonical keys for selected options
-product_norm = (
-    sdf_f.loc[sdf_f["product_disp"] == product_sel_disp, "product_c"].dropna().iloc[0]
-    if (sdf_f["product_disp"] == product_sel_disp).any()
-    else _normalize_txt(product_sel_disp)
+# Canonical key for selected commodity
+commodity_norm = (
+    sdf_f.loc[sdf_f["commodity_disp"] == commodity_sel_disp, "commodity_c"].dropna().iloc[0]
+    if (sdf_f["commodity_disp"] == commodity_sel_disp).any()
+    else _normalize_txt(commodity_sel_disp)
 )
 
-# Slice: rows for that (vendor, product)
-vp = sdf_f[(sdf_f["vendor_c"] == vendor_norm) & (sdf_f["product_c"] == product_norm)].copy()
+# Slice: rows for that (vendor, commodity)
+vp = sdf_f[(sdf_f["vendor_c"] == vendor_norm) & (sdf_f["commodity_c"] == commodity_norm)].copy()
 if vp.empty:
-    st.warning("Ese vendor no vendió ese producto en el rango seleccionado (o los nombres no coinciden).")
+    st.warning("Ese vendor no vendió esa commodity en el rango seleccionado (o los nombres no coinciden).")
     st.stop()
 
 # ------------------------
-# METRICS by CUSTOMER for (Vendor, Product)
+# METRICS by CUSTOMER for (Vendor, Commodity)
 # ------------------------
 wk = vp["date"].dt.isocalendar()
 vp["week_key"] = np.where(
@@ -378,12 +380,12 @@ st.dataframe(
     hide_index=True,
 )
 
-# Export buttons
+# Export buttons (commodity-aware names)
 csv1 = cdisp.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download customers CSV", data=csv1, file_name="customers_vendor_product.csv", mime="text/csv")
+st.download_button("⬇️ Download customers CSV", data=csv1, file_name="customers_vendor_commodity.csv", mime="text/csv")
 
 csv2 = ld.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download line items CSV", data=csv2, file_name="line_items_vendor_product.csv", mime="text/csv")
+st.download_button("⬇️ Download line items CSV", data=csv2, file_name="line_items_vendor_commodity.csv", mime="text/csv")
 
 # ------------------------
 # NOTES
