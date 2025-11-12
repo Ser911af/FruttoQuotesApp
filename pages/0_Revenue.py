@@ -241,24 +241,27 @@ if view_mode == "Annual (by Month)":
     avg_month_cur = float(cur_m["revenue"].mean()) if not cur_m.empty else 0.0
     pct_goal_avg_month = (avg_month_cur / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL else np.nan
 
-    c1, c2, c3, c4, s1, s2, s3 = st.columns([1, 1, 1, 1, 0.2, 1, 1])
+    st.markdown(f"### KPI {this_year} (Vigente)")
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         st.metric(f"%  {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
     with c2:
         st.metric(f"#PO's  {this_year}", value=f"{cur_k[1]:,}")
     with c3:
-        # CAMBIO: usar _abbr() para formato compacto
         st.metric(f"Revenue  {this_year}", value=_abbr(cur_k[2]))
     with c4:
         st.metric("Avg Month vs Goal", value=f"{pct_goal_avg_month:.1f}%")
-    with s2:
+
+    st.markdown(f"### KPI {prev_year} (Pasado)")
+    s1, s2, s3, s4 = st.columns([1, 1, 1, 1])
+    with s1:
         st.metric(f"%  {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
-    with s3:
+    with s2:
         st.metric(f"#PO's  {prev_year}", value=f"{prv_k[1]:,}")
-    s4 = st.columns([1])[0]
-    with s4:
-        # CAMBIO: usar _abbr() para formato compacto
+    with s3:
         st.metric(f"Revenue  {prev_year}", value=_abbr(prv_k[2]))
+    with s4:
+        st.metric("Avg Month vs Goal", value=f"{(float(prv_m['revenue'].mean()) / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL and not prv_m.empty else np.nan:.1f}%")
 
     # Build dataset for chart (side-by-side bars with labels)
     cur_m["Year"], prv_m["Year"] = str(this_year), str(prev_year)
@@ -328,27 +331,33 @@ else:
     pct_goal_day = (avg_day_cur / DAILY_GOAL * 100.0) if DAILY_GOAL else np.nan
 
     # KPI cards
-    c1, c2, c3, c4, c5, s1, s2, s3 = st.columns([1, 1, 1, 1, 1, 0.2, 1, 1])
+    st.markdown(f"### KPI {month_map[month_sel]} {this_year} (Vigente)")
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     with c1:
         st.metric(f"% {month_map[month_sel]} {this_year}", value=f"{(cur_k[0]*100):.1f}%" if not pd.isna(cur_k[0]) else "–")
     with c2:
         st.metric(f"#PO's {month_map[month_sel]} {this_year}", value=f"{cur_k[1]:,}")
     with c3:
-        # CAMBIO: usar _abbr() para formato compacto
         st.metric(f"Revenue {month_map[month_sel]} {this_year}", value=_abbr(cur_k[2]))
     with c4:
         st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month:.1f}%")
     with c5:
         st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day:.1f}%")
 
-    with s2:
+    st.markdown(f"### KPI {month_map[month_sel]} {prev_year} (Pasado)")
+    s1, s2, s3, s4, s5 = st.columns([1, 1, 1, 1, 1])
+    with s1:
         st.metric(f"% {month_map[month_sel]} {prev_year}", value=f"{(prv_k[0]*100):.1f}%" if not pd.isna(prv_k[0]) else "–")
-    with s3:
+    with s2:
         st.metric(f"#PO's {month_map[month_sel]} {prev_year}", value=f"{prv_k[1]:,}")
-    s4 = st.columns([1])[0]
-    with s4:
-        # CAMBIO: usar _abbr() para formato compacto
+    with s3:
         st.metric(f"Revenue {month_map[month_sel]} {prev_year}", value=_abbr(prv_k[2]))
+    with s4:
+        pct_goal_month_prev = (float(prv_d["revenue"].sum() / MONTHLY_GOAL * 100.0) if MONTHLY_GOAL and not prv_d.empty else np.nan)
+        st.metric("MTD vs Monthly Goal", value=f"{pct_goal_month_prev:.1f}%")
+    with s5:
+        pct_goal_day_prev = (float(prv_d["revenue"].mean() / DAILY_GOAL * 100.0) if DAILY_GOAL and not prv_d.empty else np.nan)
+        st.metric("Avg Day vs Daily Goal", value=f"{pct_goal_day_prev:.1f}%")
 
     # Build dataset for chart (side-by-side bars with labels)
     cur_d["Year"], prv_d["Year"] = str(this_year), str(prev_year)
