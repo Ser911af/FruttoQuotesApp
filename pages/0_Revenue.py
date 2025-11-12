@@ -1,10 +1,9 @@
 # revenue_yoy_by_month_and_day.py
 # Streamlit page: Revenue YoY — by Month and by Day (uses ONLY reqs_date)
-# - Bars: side-by-side (this year vs last year)
-# - Labels: $ compact ($4.0k, $1.2M)
-# - Green line: goal (monthly/daily)
-# - Black line: average revenue reference (raw average, not %)
-# - KPIs for both periods; goal progress cards
+# - Bars: side-by-side (this year vs last year), compact $ labels
+# - Green line: goal (monthly/daily); Black line: average revenue reference
+# - KPIs para ambos periodos; incluye progreso vs metas
+# - #PO's = conteo de PO únicos extraídos de `source` (regex)
 # - DATE SOURCE: STRICTLY reqs_date
 
 import re
@@ -39,7 +38,7 @@ st.set_page_config(page_title="Revenue YoY • Months & Days", page_icon="📊",
 st.title("📊 Revenue YoY — by Month and by Day")
 st.caption(
     "Compare total revenue Year-over-Year. Switch between **Annual (by Month)** and **Monthly (by Day)** views. "
-    "KPI cards show Profit %, #Orders (count of `source` rows when available), and Total Revenue (short format). "
+    "KPI cards show Profit %, #PO’s (unique POs from `source`), and Total Revenue (short format). "
     "Green line = goal. Black line = average revenue reference. **Date source: reqs_date only.**"
 )
 
@@ -82,6 +81,21 @@ def _load_supabase_client(secret_key: str):
     if not url or not key:
         return None
     return create_client(url, key)
+
+# Extract normalized PO id from a source string (e.g., "PO #4933" -> "4933")
+_PO_PAT = re.compile(r"po\\s*#?\\s*([a-z0-9-]+)", re.IGNORECASE)
+
+def _extract_po_id(x: Optional[str]) -> Optional[str]:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
+    m = _PO_PAT.search(str(x))
+    if not m:
+        return None
+    po = m.group(1).strip()
+    # normalize like '000123' -> '123' but keep alphanumerics as-is
+    if po.isdigit():
+        po = str(int(po))
+    return po or None
 
 # ------------------------
 # DATA LOADER  (reqs_date only)
@@ -162,9 +176,11 @@ def load_sales() -> pd.DataFrame:
         sdf["total_revenue"].abs() > 1e-9, sdf["profit"] / sdf["total_revenue"], np.nan
     )
 
-    # Orders proxy if `source` missing → fall back to row count later
-    if "source" not in sdf.columns:
-        sdf["source"] = np.nan
+    # Normalize PO id from `source` for unique counting
+    if "source" in sdf.columns:
+        sdf["po_id"] = sdf["source"].apply(_extract_po_id)
+    else:
+        sdf["po_id"] = np.nan
 
     return sdf
 
@@ -191,7 +207,6 @@ with st.sidebar:
     month_map = {i+1: m for i, m in enumerate(month_names)}
 
     if view_mode == "Monthly (by Day)":
-        # Default to current month if present; otherwise first available in that year
         months_this_year = sorted(sdf.loc[sdf["year"] == year_sel, "month"].unique().tolist())
         default_month_idx = (months_this_year[-1] - 1) if months_this_year else 0
         month_sel_name = st.selectbox("Month", options=month_names, index=default_month_idx)
@@ -200,15 +215,15 @@ with st.sidebar:
         month_sel = None
 
 # ------------------------
-# KPI helper
+# KPI helper  (uses unique PO ids)
 # ------------------------
 def kpis(df: pd.DataFrame) -> Tuple[float, int, float]:
     rev = pd.to_numeric(df["total_revenue"], errors="coerce").fillna(0.0)
     prof = pd.to_numeric(df["profit"], errors="coerce").fillna(0.0)
     profit_pct = float((prof.sum() / rev.sum()) if rev.sum() else np.nan)
 
-    if "source" in df.columns and not df["source"].isna().all():
-        orders = int(df["source"].notna().sum())
+    if "po_id" in df.columns and df["po_id"].notna().any():
+        orders = int(df["po_id"].nunique())   # <-- UNIQUE PO count
     else:
         orders = int(len(df))
 
@@ -256,7 +271,7 @@ if view_mode == "Annual (by Month)":
     with s4:
         st.metric(f"Revenue  {prev_year}", value=_abbr(prv_k[2]))
 
-    # Build dataset for chart (side-by-side bars with labels)
+    # Chart (grouped bars + goal/mean lines)
     cur_m["Year"], prv_m["Year"] = str(this_year), str(prev_year)
     allm = pd.concat([cur_m, prv_m], ignore_index=True)
     allm["Month"] = allm["month"].map({i: n for i, n in enumerate(month_names, start=1)})
@@ -344,7 +359,7 @@ else:
     with s4:
         st.metric(f"Revenue {month_map[month_sel]} {prev_year}", value=_abbr(prv_k[2]))
 
-    # Build dataset for chart (side-by-side bars with labels)
+    # Chart (grouped bars + goal/mean lines)
     cur_d["Year"], prv_d["Year"] = str(this_year), str(prev_year)
     alld = pd.concat([cur_d, prv_d], ignore_index=True)
 
@@ -388,7 +403,7 @@ else:
 # ------------------------
 st.caption(
     "Notes: The page uses **reqs_date exclusively**. Rows without a valid reqs_date are dropped. "
+    "#PO's counts **unique** POs parsed from `source` (pattern like 'PO #4933'); if not present, falls back to row count. "
     "Profit% uses available `profit` (or `total_revenue - total_cost` when `total_cost` exists). "
-    "#PO's counts non-null `source` rows; if `source` is missing it falls back to row count. "
     "Black line = average revenue reference; Green line = goal."
 )
