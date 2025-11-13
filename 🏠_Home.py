@@ -76,10 +76,11 @@ links = [
     ("pages/2_Upload_Quotes.py",           "📤 Upload Quotes"),
     ("pages/3_Customer_Retention.py",      "🧲 Customer Retention"),
     ("pages/4_Vendor_Retention.py",        "🔁 Vendor Retention"),
-    ("pages/5_Prod. Coverage.py",          "📦 Product Coverage"),  # Consider renaming to 5_Prod_Coverage.py
+    ("pages/5_Prod_Coverage.py",           "📦 Product Coverage"),
     ("pages/6_Metrics.py",                 "📈 Metrics"),
     ("pages/7_VendorProduct_Customers.py", "🔗 VendorProduct Customers"),
 ]
+
 
 left, right = st.columns(2)
 for i, (path, label) in enumerate(links):
