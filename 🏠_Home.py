@@ -67,24 +67,20 @@ st.divider()
 st.subheader("Pages")
 
 # ----------------------------
-# Navigation (updated)
+# Navigation (con nombres de la foto, en ese orden)
 # ----------------------------
-# IMPORTANT: keep names EXACTLY as they are under /pages
 links = [
     ("pages/0_Revenue.py",                 "💵 Revenue"),
     ("pages/1_Daily_Sheet.py",             "📊 Daily Sheet"),
     ("pages/2_Upload_Quotes.py",           "📤 Upload Quotes"),
-    ("pages/3_Customer_Retention.py",      "🧲 Customer Retention"),
-    ("pages/4_Vendor_Retention.py",        "🔁 Vendor Retention"),
-    ("pages/5_Prod_Coverage.py",           "📦 Product Coverage"),
-    ("pages/6_Metrics.py",                 "📈 Metrics"),
-    ("pages/7_VendorProduct_Customers.py", "🔗 VendorProduct Customers"),
+    ("pages/3_Prod. Coverage.py",          "📦 Product Coverage"),
+    ("pages/4_VendorProduct_Customers.py", "🔗 VendorProduct Customers"),
+    ("pages/5_Metrics.py",                 "📈 Metrics"),
+    ("pages/6_Vendor_Retention.py",        "🔁 Vendor Retention"),
+    ("pages/7_Customer_Retention.py",      "🧲 Customer Retention"),
 ]
-
 
 left, right = st.columns(2)
 for i, (path, label) in enumerate(links):
     with (left if i % 2 == 0 else right):
         safe_page_link(path, label)
-
- 
